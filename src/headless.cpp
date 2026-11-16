@@ -1,4 +1,5 @@
 #include "headless.h"
+#include "gpusearch.h"
 
 #include "message.h"
 #include "util.h"
@@ -49,6 +50,7 @@ Headless::Headless(QString sessionpath, QString resultspath, bool reset, QObject
 
     QSettings settings(APP_STRING, APP_STRING);
     g_extgen.load(settings);
+    g_gpuSearchEnabled = settings.value("config/gpuSearch", true).toBool();
 
     if (!loadSession(sessionpath, reset))
         return;

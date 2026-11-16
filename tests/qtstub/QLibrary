@@ -1,0 +1,17 @@
+#pragma once
+#include "QString"
+#include <dlfcn.h>
+#include <cstdlib>
+class QLibrary {
+    void *h = nullptr; std::string name;
+public:
+    void setFileName(const QString& n) { name = n.s; }
+    bool load() {
+        if (h) return true;
+        const char *m = getenv("GK_MOCK_CL");           // test hook: load the mock driver
+        h = dlopen(m ? m : name.c_str(), RTLD_NOW);
+        return h != nullptr;
+    }
+    bool isLoaded() const { return h != nullptr; }
+    void *resolve(const char *s) { return h ? dlsym(h, s) : nullptr; }
+};

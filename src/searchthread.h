@@ -2,6 +2,7 @@
 #define SEARCHTHREAD_H
 
 #include "search.h"
+#include "gpusearch.h"
 #include "config.h"
 
 #include <QThread>
@@ -12,6 +13,7 @@
 #include <QMessageBox>
 
 #include <deque>
+#include <memory>
 
 struct Session
 {
@@ -83,6 +85,9 @@ public:
     int                         large;
     ConditionTree               condtree;
     int                         itemsize;   // number of seeds per search item
+    int                         itemmax;    // upper limit for itemsize
+    std::unique_ptr<GpuFilter>  gpu;        // optional GPU prefilter (may be null)
+    QString                     gpuinfo;    // GPU device name or reason it is not used
     int                         threadcnt;  // numbr of worker threads
     Gen48Config                 gen48;      // 48-bit generator settings
     std::vector<uint64_t>       slist;      // candidate list
@@ -104,6 +109,7 @@ public:
     ~SearchWorker();
 
     bool getNextItem();
+    bool gpuReady() const;
     virtual void run() override;
 
 signals:
@@ -126,6 +132,7 @@ public:
 
 private:
     SearchThreadEnv     env;
+    std::vector<uint64_t> survivors;    // seeds that passed the GPU prefilter
 };
 
 

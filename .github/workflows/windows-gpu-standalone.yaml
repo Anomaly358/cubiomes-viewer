@@ -1,0 +1,62 @@
+name: Windows GPU standalone
+
+# Builds a single, self-contained cubiomes-viewer.exe (static Qt, static
+# runtime) with the OpenCL seed-search acceleration. The GPU driver's own
+# OpenCL.dll (installed with every NVIDIA/AMD/Intel graphics driver) is loaded
+# at runtime, so no SDK or extra DLLs are shipped.
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup MSYS2 (MinGW64, static Qt5)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            make
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-qt5-static
+
+      - name: Test GPU kernel logic against cubiomes
+        run: sh tests/run_gpu_kernel_test.sh
+
+      - name: Build
+        run: |
+          export PATH=/mingw64/qt5-static/bin:$PATH
+          qmake CONFIG+=release cubiomes-viewer.pro
+          mingw32-make -j4
+
+      - name: Verify the executable is standalone
+        run: |
+          exe=release/cubiomes-viewer.exe
+          ls -l "$exe"
+          echo "DLL imports:"
+          objdump -p "$exe" | grep "DLL Name" | sort -u
+          # only Windows system libraries may be imported
+          if objdump -p "$exe" | grep "DLL Name" | grep -iE "Qt5|libgcc|libstdc|libwinpthread"; then
+            echo "executable still depends on bundled DLLs"; exit 1
+          fi
+          "$exe" --version
+
+      - name: Save build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cubiomes-viewer-gpu-win64
+          path: release/cubiomes-viewer.exe

@@ -6,6 +6,7 @@
 #include "configdialog.h"
 #include "exportdialog.h"
 #include "extgendialog.h"
+#include "gpusearch.h"
 #include "layerdialog.h"
 #include "maptoolsdialog.h"
 #include "message.h"
@@ -1167,6 +1168,7 @@ void MainWindow::onUpdateConfig()
 {
     Config old = config;
     config.load();
+    g_gpuSearchEnabled = config.gpuSearch;
 
     if (old.lang != config.lang)
     {

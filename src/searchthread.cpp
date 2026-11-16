@@ -140,6 +140,9 @@ SearchMaster::SearchMaster(QWidget *parent)
     , large()
     , condtree()
     , itemsize()
+    , itemmax(0x10000)
+    , gpu()
+    , gpuinfo()
     , threadcnt()
     , gen48()
     , slist()
@@ -566,6 +569,33 @@ void SearchMaster::preSearch()
             prog = (seed << 16) | (seed >> 48);
         }
     }
+
+    // optional GPU prefilter: only for plain 64-bit seed ranges and 64-bit
+    // seed lists, where the GPU can test the seeds directly
+    gpu.reset();
+    gpuinfo.clear();
+    itemmax = 0x10000;
+    if (g_gpuSearchEnabled)
+    {
+        bool plainrange = (searchtype == SEARCH_INC && slist.empty());
+        bool seedlist = (searchtype == SEARCH_LIST && !slist.empty());
+        if (plainrange || seedlist)
+        {
+            std::unique_ptr<GpuFilter> g(new GpuFilter());
+            QString info;
+            if (g->init(condtree, mc, &info))
+            {
+                gpu = std::move(g);
+                gpuinfo = info;
+                itemmax = 1 << 22;
+                itemsize = 1 << 16;
+            }
+            else
+                gpuinfo = info;
+        }
+        else
+            gpuinfo = QStringLiteral("this search mode runs on the CPU");
+    }
 }
 
 void SearchMaster::startSearch()
@@ -755,12 +785,18 @@ bool SearchMaster::getProgress(QString *status, uint64_t *prog, uint64_t *end, u
         else
             eta = QString("%1:%2").arg(s / 60).arg(s % 60, 2, 10, QLatin1Char('0'));
     }
-    *status = QString("seeds/sec: %1 min: %2 max: %3 isize: %4 eta: %5")
+    QString dev;
+    if (gpu && gpu->ready())
+        dev = QString(" [GPU: %1]").arg(gpuinfo);
+    else if (g_gpuSearchEnabled && !gpuinfo.isEmpty())
+        dev = QString(" [CPU: %1]").arg(gpuinfo);
+    *status = QString("seeds/sec: %1 min: %2 max: %3 isize: %4 eta: %5%6")
         .arg(getAbbrNum(*avg), -8)
         .arg(getAbbrNum(*min), -8)
         .arg(getAbbrNum(*max), -8)
         .arg(itemsize, -3)
-        .arg(eta);
+        .arg(eta)
+        .arg(dev);
 
     return valid;
 }
@@ -779,7 +815,7 @@ bool SearchMaster::requestItem(SearchWorker *item)
     {
         if (count < 1e2 && itemsize > 1)
             itemsize /= 2;
-        if (count > 1e3 && itemsize < 0x10000)
+        if (count > 1e3 && itemsize < itemmax)
             itemsize *= 2;
         itemtimer.start();
         count = 0;
@@ -934,6 +970,11 @@ SearchWorker::~SearchWorker()
 {
 }
 
+bool SearchWorker::gpuReady() const
+{
+    return master->gpu && master->gpu->ready();
+}
+
 bool SearchWorker::getNextItem()
 {
     QMutexLocker locker(&master->mutex);
@@ -951,6 +992,27 @@ void SearchWorker::run()
         while (!*env.stop && getNextItem())
         {   // seed = slist[..]
             uint64_t ie = idx+scnt < len ? idx+scnt : len;
+            if (gpuReady())
+            {   // the GPU drops seeds that cannot match; the CPU verifies the rest
+                survivors.clear();
+                if (master->gpu->filterList(slist + idx, ie - idx, survivors, env.stop))
+                {
+                    for (uint64_t s : survivors)
+                    {
+                        if (*env.stop)
+                            break;
+                        seed = s;
+                        env.setSeed(seed);
+                        if (testTreeAt(origin, &env, PASS_FULL_64, nullptr) == COND_OK)
+                        {
+                            if (!*env.stop)
+                                emit result(seed);
+                        }
+                    }
+                    continue;
+                }
+                // device error: fall through and process this item on the CPU
+            }
             for (uint64_t i = idx; i < ie; i++)
             {
                 seed = slist[i];
@@ -1037,6 +1099,30 @@ void SearchWorker::run()
             else
             {   // seed++
                 seed = sstart;
+                if (gpuReady() && scnt > 0)
+                {
+                    uint64_t n = (uint64_t) scnt;
+                    if (n - 1 > ~sstart) // never wrap around 2^64
+                        n = ~sstart + 1;
+                    survivors.clear();
+                    if (master->gpu->filterRange(sstart, n, survivors, env.stop))
+                    {
+                        for (uint64_t s : survivors)
+                        {
+                            if (*env.stop)
+                                break;
+                            seed = s;
+                            env.setSeed(seed);
+                            if (testTreeAt(origin, &env, PASS_FULL_64, nullptr) == COND_OK)
+                            {
+                                if (!*env.stop)
+                                    emit result(seed);
+                            }
+                        }
+                        continue;
+                    }
+                    // device error: process this item on the CPU instead
+                }
                 for (int i = 0; i < scnt; i++)
                 {
                     env.setSeed(seed);

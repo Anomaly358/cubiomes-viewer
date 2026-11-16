@@ -1,0 +1,4 @@
+#pragma once
+#include <mutex>
+class QMutex { public: std::mutex m; void lock(){m.lock();} void unlock(){m.unlock();} };
+class QMutexLocker { QMutex *mm; public: QMutexLocker(QMutex *x):mm(x){mm->lock();} ~QMutexLocker(){mm->unlock();} };

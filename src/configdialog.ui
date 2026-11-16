@@ -225,6 +225,16 @@
             </property>
            </widget>
           </item>
+          <item row="4" column="0" colspan="2">
+           <widget class="QCheckBox" name="checkGpu">
+            <property name="toolTip">
+             <string>Use the GPU (OpenCL) to skip seeds that cannot match structure conditions. Results are identical; falls back to the CPU if no GPU is available.</string>
+            </property>
+            <property name="text">
+             <string>Accelerate seed search with GPU (OpenCL)</string>
+            </property>
+           </widget>
+          </item>
           <item row="2" column="0" colspan="2">
            <widget class="QCheckBox" name="checkWindowPos">
             <property name="text">

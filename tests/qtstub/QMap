@@ -1,0 +1,3 @@
+#pragma once
+#include <map>
+template<class K, class V> using QMap = std::map<K,V>;

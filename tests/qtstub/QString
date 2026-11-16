@@ -1,0 +1,28 @@
+#pragma once
+#include <string>
+#include <cstring>
+#include <cstdio>
+#define QT_TRANSLATE_NOOP(c,s) s
+class QByteArray {
+public:
+    std::string s;
+    QByteArray() {}
+    QByteArray(int n, char c) : s((size_t)n, c) {}
+    const char *constData() const { return s.data(); }
+    char *data() { return &s[0]; }
+    int size() const { return (int)s.size(); }
+};
+class QString {
+public:
+    std::string s;
+    QString() {}
+    QString(const char *c) : s(c) {}
+    static QString fromLatin1(const char *c) { return QString(c); }
+    static QString fromLatin1(const QByteArray& b) { return QString(b.s.c_str()); }
+    QString left(int n) const { QString r; r.s = s.substr(0, (size_t)n); return r; }
+    QString trimmed() const { return *this; }
+    QString operator+(const QString& o) const { QString r; r.s = s + o.s; return r; }
+    friend QString operator+(const char *a, const QString& b) { QString r; r.s = std::string(a) + b.s; return r; }
+    bool isEmpty() const { return s.empty(); }
+    const char *c_str() const { return s.c_str(); }
+};

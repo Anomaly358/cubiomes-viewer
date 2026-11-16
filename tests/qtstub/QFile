@@ -1,0 +1,20 @@
+#pragma once
+#include "QString"
+#include <cstdlib>
+#include <fstream>
+#include <sstream>
+class QIODevice { public: enum OpenModeFlag { ReadOnly = 1 }; };
+class QFile {
+    std::string path; std::string data;
+public:
+    QFile(const QString& p) { path = p.s; }
+    bool open(int) {
+        // resource ":/gpu/gpukernel.cl" -> real file (set GK_KERNEL_PATH)
+        const char *k = getenv("GK_KERNEL_PATH");
+        std::ifstream f(k ? k : path.c_str(), std::ios::binary);
+        if (!f) return false;
+        std::stringstream ss; ss << f.rdbuf(); data = ss.str();
+        return true;
+    }
+    QByteArray readAll() { QByteArray b; b.s = data; return b; }
+};

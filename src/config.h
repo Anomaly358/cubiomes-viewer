@@ -174,6 +174,7 @@ struct Config
     bool showBBoxes;
     bool restoreSession;
     bool restoreWindow;
+    bool gpuSearch;         // use the GPU (OpenCL) to prefilter structure searches
     bool checkForUpdates;
     int autosaveCycle;
     int uistyle;

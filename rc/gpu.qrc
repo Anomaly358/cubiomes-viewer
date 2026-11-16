@@ -1,0 +1,5 @@
+<RCC>
+    <qresource prefix="/gpu">
+        <file alias="gpukernel.cl">../src/gpukernel.cl</file>
+    </qresource>
+</RCC>

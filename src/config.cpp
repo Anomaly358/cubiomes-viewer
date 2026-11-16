@@ -350,6 +350,7 @@ void Config::reset()
     showBBoxes = true;
     restoreSession = true;
     restoreWindow = false;
+    gpuSearch = true;
     checkForUpdates = false;
     autosaveCycle = 10;
     uistyle = STYLE_SYSTEM;
@@ -380,6 +381,7 @@ void Config::load(QSettings& settings)
     showBBoxes = settings.value("config/showBBoxes", showBBoxes).toBool();
     restoreSession = settings.value("config/restoreSession", restoreSession).toBool();
     restoreWindow = settings.value("config/restoreWindow", restoreWindow).toBool();
+    gpuSearch = settings.value("config/gpuSearch", gpuSearch).toBool();
     checkForUpdates = settings.value("config/checkForUpdates", checkForUpdates).toBool();
     autosaveCycle = settings.value("config/autosaveCycle", autosaveCycle).toInt();
     uistyle = settings.value("config/uistyle", uistyle).toInt();
@@ -403,6 +405,7 @@ void Config::save(QSettings& settings)
     settings.setValue("config/showBBoxes", showBBoxes);
     settings.setValue("config/restoreSession", restoreSession);
     settings.setValue("config/restoreWindow", restoreWindow);
+    settings.setValue("config/gpuSearch", gpuSearch);
     settings.setValue("config/checkForUpdates", checkForUpdates);
     settings.setValue("config/autosaveCycle", autosaveCycle);
     settings.setValue("config/uistyle", uistyle);

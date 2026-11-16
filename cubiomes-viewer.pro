@@ -117,6 +117,7 @@ SOURCES += \
         src/formgen48.cpp \
         src/formsearchcontrol.cpp \
         src/gotodialog.cpp \
+        src/gpusearch.cpp \
         src/headless.cpp \
         src/maptoolsdialog.cpp \
         src/message.cpp \
@@ -191,6 +192,8 @@ HEADERS += \
         src/qzipwriter.h \
         src/rangedialog.h \
         src/scripts.h \
+        src/cl_min.h \
+        src/gpusearch.h \
         src/search.h \
         src/searchthread.h \
         src/seedtables.h \
@@ -227,7 +230,8 @@ RESOURCES += \
         rc/style.qrc \
         rc/examples.qrc \
         rc/lang.qrc \
-        rc/qh.qrc
+        rc/qh.qrc \
+        rc/gpu.qrc
 
 # ----- translations (pluralization) -----
 

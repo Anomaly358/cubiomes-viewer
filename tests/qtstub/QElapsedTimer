@@ -1,0 +1,10 @@
+#pragma once
+#include <chrono>
+#include <cstdint>
+typedef int64_t qint64;
+class QElapsedTimer {
+    std::chrono::steady_clock::time_point t0;
+public:
+    void start() { t0 = std::chrono::steady_clock::now(); }
+    qint64 nsecsElapsed() const { return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-t0).count(); }
+};

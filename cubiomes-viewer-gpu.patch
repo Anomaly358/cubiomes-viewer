@@ -1,0 +1,1972 @@
+diff --git a/.github/workflows/windows-gpu-standalone.yaml b/.github/workflows/windows-gpu-standalone.yaml
+new file mode 100644
+index 0000000..448e4c8
+--- /dev/null
++++ b/.github/workflows/windows-gpu-standalone.yaml
+@@ -0,0 +1,62 @@
++name: Windows GPU standalone
++
++# Builds a single, self-contained cubiomes-viewer.exe (static Qt, static
++# runtime) with the OpenCL seed-search acceleration. The GPU driver's own
++# OpenCL.dll (installed with every NVIDIA/AMD/Intel graphics driver) is loaded
++# at runtime, so no SDK or extra DLLs are shipped.
++
++on:
++  workflow_dispatch:
++  push:
++    tags:
++      - 'v*'
++
++jobs:
++  build:
++    runs-on: windows-latest
++    defaults:
++      run:
++        shell: msys2 {0}
++
++    steps:
++      - name: Checkout repo
++        uses: actions/checkout@v4
++        with:
++          submodules: recursive
++
++      - name: Setup MSYS2 (MinGW64, static Qt5)
++        uses: msys2/setup-msys2@v2
++        with:
++          msystem: MINGW64
++          update: true
++          install: >-
++            make
++            mingw-w64-x86_64-gcc
++            mingw-w64-x86_64-qt5-static
++
++      - name: Test GPU kernel logic against cubiomes
++        run: sh tests/run_gpu_kernel_test.sh
++
++      - name: Build
++        run: |
++          export PATH=/mingw64/qt5-static/bin:$PATH
++          qmake CONFIG+=release cubiomes-viewer.pro
++          mingw32-make -j4
++
++      - name: Verify the executable is standalone
++        run: |
++          exe=release/cubiomes-viewer.exe
++          ls -l "$exe"
++          echo "DLL imports:"
++          objdump -p "$exe" | grep "DLL Name" | sort -u
++          # only Windows system libraries may be imported
++          if objdump -p "$exe" | grep "DLL Name" | grep -iE "Qt5|libgcc|libstdc|libwinpthread"; then
++            echo "executable still depends on bundled DLLs"; exit 1
++          fi
++          "$exe" --version
++
++      - name: Save build artifact
++        uses: actions/upload-artifact@v4
++        with:
++          name: cubiomes-viewer-gpu-win64
++          path: release/cubiomes-viewer.exe
+diff --git a/cubiomes-viewer.pro b/cubiomes-viewer.pro
+index d7a4aee..0facc63 100644
+--- a/cubiomes-viewer.pro
++++ b/cubiomes-viewer.pro
+@@ -117,6 +117,7 @@ SOURCES += \
+         src/formgen48.cpp \
+         src/formsearchcontrol.cpp \
+         src/gotodialog.cpp \
++        src/gpusearch.cpp \
+         src/headless.cpp \
+         src/maptoolsdialog.cpp \
+         src/message.cpp \
+@@ -191,6 +192,8 @@ HEADERS += \
+         src/qzipwriter.h \
+         src/rangedialog.h \
+         src/scripts.h \
++        src/cl_min.h \
++        src/gpusearch.h \
+         src/search.h \
+         src/searchthread.h \
+         src/seedtables.h \
+@@ -227,7 +230,8 @@ RESOURCES += \
+         rc/style.qrc \
+         rc/examples.qrc \
+         rc/lang.qrc \
+-        rc/qh.qrc
++        rc/qh.qrc \
++        rc/gpu.qrc
+ 
+ # ----- translations (pluralization) -----
+ 
+diff --git a/rc/gpu.qrc b/rc/gpu.qrc
+new file mode 100644
+index 0000000..719b836
+--- /dev/null
++++ b/rc/gpu.qrc
+@@ -0,0 +1,5 @@
++<RCC>
++    <qresource prefix="/gpu">
++        <file alias="gpukernel.cl">../src/gpukernel.cl</file>
++    </qresource>
++</RCC>
+diff --git a/src/cl_min.h b/src/cl_min.h
+new file mode 100644
+index 0000000..c665140
+--- /dev/null
++++ b/src/cl_min.h
+@@ -0,0 +1,81 @@
++#ifndef CL_MIN_H
++#define CL_MIN_H
++
++// Minimal OpenCL 1.2 declarations, so the viewer builds without an OpenCL SDK
++// and loads the vendor driver (OpenCL.dll / libOpenCL.so.1) at runtime.
++
++#include <stddef.h>
++#include <stdint.h>
++
++#ifdef _WIN32
++#define CL_API_CALL __stdcall
++#else
++#define CL_API_CALL
++#endif
++
++typedef int32_t     cl_int;
++typedef uint32_t    cl_uint;
++typedef uint64_t    cl_ulong;
++typedef cl_uint     cl_bool;
++typedef cl_ulong    cl_bitfield;
++typedef cl_bitfield cl_device_type;
++typedef cl_bitfield cl_mem_flags;
++typedef cl_bitfield cl_command_queue_properties;
++typedef intptr_t    cl_context_properties;
++typedef cl_uint     cl_device_info;
++typedef cl_uint     cl_platform_info;
++typedef cl_uint     cl_program_build_info;
++
++typedef struct _cl_platform_id    *cl_platform_id;
++typedef struct _cl_device_id      *cl_device_id;
++typedef struct _cl_context        *cl_context;
++typedef struct _cl_command_queue  *cl_command_queue;
++typedef struct _cl_mem            *cl_mem;
++typedef struct _cl_program        *cl_program;
++typedef struct _cl_kernel         *cl_kernel;
++typedef struct _cl_event          *cl_event;
++
++enum
++{
++    CL_SUCCESS                  = 0,
++    CL_TRUE                     = 1,
++    CL_DEVICE_TYPE_GPU          = 1 << 2,
++    CL_DEVICE_TYPE_ALL          = 0xFFFFFFFF,
++    CL_DEVICE_TYPE              = 0x1000,
++    CL_DEVICE_MAX_COMPUTE_UNITS = 0x1002,
++    CL_DEVICE_GLOBAL_MEM_SIZE   = 0x101F,
++    CL_DEVICE_AVAILABLE         = 0x1027,
++    CL_DEVICE_COMPILER_AVAILABLE= 0x1028,
++    CL_DEVICE_NAME              = 0x102B,
++    CL_DEVICE_HOST_UNIFIED_MEMORY = 0x1035,
++    CL_CONTEXT_PLATFORM         = 0x1084,
++    CL_PROGRAM_BUILD_LOG        = 0x1183,
++    CL_MEM_READ_WRITE           = 1 << 0,
++    CL_MEM_READ_ONLY            = 1 << 2,
++    CL_MEM_COPY_HOST_PTR        = 1 << 5,
++};
++
++typedef cl_int (CL_API_CALL *PFN_clGetPlatformIDs)(cl_uint, cl_platform_id*, cl_uint*);
++typedef cl_int (CL_API_CALL *PFN_clGetDeviceIDs)(cl_platform_id, cl_device_type, cl_uint, cl_device_id*, cl_uint*);
++typedef cl_int (CL_API_CALL *PFN_clGetDeviceInfo)(cl_device_id, cl_device_info, size_t, void*, size_t*);
++typedef cl_context (CL_API_CALL *PFN_clCreateContext)(const cl_context_properties*, cl_uint, const cl_device_id*,
++        void (CL_API_CALL *)(const char*, const void*, size_t, void*), void*, cl_int*);
++typedef cl_command_queue (CL_API_CALL *PFN_clCreateCommandQueue)(cl_context, cl_device_id, cl_command_queue_properties, cl_int*);
++typedef cl_program (CL_API_CALL *PFN_clCreateProgramWithSource)(cl_context, cl_uint, const char**, const size_t*, cl_int*);
++typedef cl_int (CL_API_CALL *PFN_clBuildProgram)(cl_program, cl_uint, const cl_device_id*, const char*,
++        void (CL_API_CALL *)(cl_program, void*), void*);
++typedef cl_int (CL_API_CALL *PFN_clGetProgramBuildInfo)(cl_program, cl_device_id, cl_program_build_info, size_t, void*, size_t*);
++typedef cl_kernel (CL_API_CALL *PFN_clCreateKernel)(cl_program, const char*, cl_int*);
++typedef cl_mem (CL_API_CALL *PFN_clCreateBuffer)(cl_context, cl_mem_flags, size_t, void*, cl_int*);
++typedef cl_int (CL_API_CALL *PFN_clEnqueueWriteBuffer)(cl_command_queue, cl_mem, cl_bool, size_t, size_t, const void*, cl_uint, const cl_event*, cl_event*);
++typedef cl_int (CL_API_CALL *PFN_clEnqueueReadBuffer)(cl_command_queue, cl_mem, cl_bool, size_t, size_t, void*, cl_uint, const cl_event*, cl_event*);
++typedef cl_int (CL_API_CALL *PFN_clEnqueueNDRangeKernel)(cl_command_queue, cl_kernel, cl_uint, const size_t*, const size_t*, const size_t*, cl_uint, const cl_event*, cl_event*);
++typedef cl_int (CL_API_CALL *PFN_clSetKernelArg)(cl_kernel, cl_uint, size_t, const void*);
++typedef cl_int (CL_API_CALL *PFN_clFinish)(cl_command_queue);
++typedef cl_int (CL_API_CALL *PFN_clReleaseMemObject)(cl_mem);
++typedef cl_int (CL_API_CALL *PFN_clReleaseKernel)(cl_kernel);
++typedef cl_int (CL_API_CALL *PFN_clReleaseProgram)(cl_program);
++typedef cl_int (CL_API_CALL *PFN_clReleaseCommandQueue)(cl_command_queue);
++typedef cl_int (CL_API_CALL *PFN_clReleaseContext)(cl_context);
++
++#endif // CL_MIN_H
+diff --git a/src/config.cpp b/src/config.cpp
+index 4c98527..f7e3884 100644
+--- a/src/config.cpp
++++ b/src/config.cpp
+@@ -350,6 +350,7 @@ void Config::reset()
+     showBBoxes = true;
+     restoreSession = true;
+     restoreWindow = false;
++    gpuSearch = true;
+     checkForUpdates = false;
+     autosaveCycle = 10;
+     uistyle = STYLE_SYSTEM;
+@@ -380,6 +381,7 @@ void Config::load(QSettings& settings)
+     showBBoxes = settings.value("config/showBBoxes", showBBoxes).toBool();
+     restoreSession = settings.value("config/restoreSession", restoreSession).toBool();
+     restoreWindow = settings.value("config/restoreWindow", restoreWindow).toBool();
++    gpuSearch = settings.value("config/gpuSearch", gpuSearch).toBool();
+     checkForUpdates = settings.value("config/checkForUpdates", checkForUpdates).toBool();
+     autosaveCycle = settings.value("config/autosaveCycle", autosaveCycle).toInt();
+     uistyle = settings.value("config/uistyle", uistyle).toInt();
+@@ -403,6 +405,7 @@ void Config::save(QSettings& settings)
+     settings.setValue("config/showBBoxes", showBBoxes);
+     settings.setValue("config/restoreSession", restoreSession);
+     settings.setValue("config/restoreWindow", restoreWindow);
++    settings.setValue("config/gpuSearch", gpuSearch);
+     settings.setValue("config/checkForUpdates", checkForUpdates);
+     settings.setValue("config/autosaveCycle", autosaveCycle);
+     settings.setValue("config/uistyle", uistyle);
+diff --git a/src/config.h b/src/config.h
+index ee169fc..58f501d 100644
+--- a/src/config.h
++++ b/src/config.h
+@@ -174,6 +174,7 @@ struct Config
+     bool showBBoxes;
+     bool restoreSession;
+     bool restoreWindow;
++    bool gpuSearch;         // use the GPU (OpenCL) to prefilter structure searches
+     bool checkForUpdates;
+     int autosaveCycle;
+     int uistyle;
+diff --git a/src/configdialog.cpp b/src/configdialog.cpp
+index 0e1e12a..eb3b8b5 100644
+--- a/src/configdialog.cpp
++++ b/src/configdialog.cpp
+@@ -66,6 +66,7 @@ void ConfigDialog::initConfig(Config *config)
+     ui->checkBBoxes->setChecked(config->showBBoxes);
+     ui->checkRestore->setChecked(config->restoreSession);
+     ui->checkWindowPos->setChecked(config->restoreWindow);
++    ui->checkGpu->setChecked(config->gpuSearch);
+     ui->checkUpdates->setChecked(config->checkForUpdates);
+     ui->checkAutosave->setChecked(config->autosaveCycle != 0);
+     if (config->autosaveCycle)
+@@ -93,6 +94,7 @@ Config ConfigDialog::getConfig()
+     conf.showBBoxes = ui->checkBBoxes->isChecked();
+     conf.restoreSession = ui->checkRestore->isChecked();
+     conf.restoreWindow = ui->checkWindowPos->isChecked();
++    conf.gpuSearch = ui->checkGpu->isChecked();
+     conf.checkForUpdates = ui->checkUpdates->isChecked();
+     conf.autosaveCycle = ui->checkAutosave->isChecked() ? ui->spinAutosave->value() : 0;
+     conf.uistyle = ui->comboStyle->currentIndex();
+diff --git a/src/configdialog.ui b/src/configdialog.ui
+index ac79e34..6daef29 100644
+--- a/src/configdialog.ui
++++ b/src/configdialog.ui
+@@ -225,6 +225,16 @@
+             </property>
+            </widget>
+           </item>
++          <item row="4" column="0" colspan="2">
++           <widget class="QCheckBox" name="checkGpu">
++            <property name="toolTip">
++             <string>Use the GPU (OpenCL) to skip seeds that cannot match structure conditions. Results are identical; falls back to the CPU if no GPU is available.</string>
++            </property>
++            <property name="text">
++             <string>Accelerate seed search with GPU (OpenCL)</string>
++            </property>
++           </widget>
++          </item>
+           <item row="2" column="0" colspan="2">
+            <widget class="QCheckBox" name="checkWindowPos">
+             <property name="text">
+diff --git a/src/gpukernel.cl b/src/gpukernel.cl
+new file mode 100644
+index 0000000..86f36a4
+--- /dev/null
++++ b/src/gpukernel.cl
+@@ -0,0 +1,195 @@
++// OpenCL prefilter for Cubiomes Viewer structure conditions.
++//
++// For each candidate seed this kernel evaluates a conservative, necessary
++// condition: "at least `count` structure positions (as computed by cubiomes
++// getStructurePos, i.e. BEFORE any biome viability test) lie inside the
++// condition's search area". Seeds that fail cannot satisfy the full CPU
++// condition either, so they can be discarded. Seeds that pass are re-checked
++// by the exact CPU code, so results are identical to a CPU-only search.
++//
++// This file is valid OpenCL C 1.2 and is also included as plain C++ by the
++// verification harness (tests/gpu_kernel_test.cpp), see the shim there.
++
++#if defined(GK_OPENCL) || defined(__OPENCL_VERSION__) || defined(__OPENCL_C_VERSION__)
++#ifndef GK_OPENCL
++#define GK_OPENCL 1
++#endif
++typedef long slong;     // signed 64-bit
++#else
++// host-side shim: the verification harness defines ulong, uint, slong
++// and the __constant/__global qualifiers before including this file.
++#endif
++
++#define GK_FEATURE  0   // getFeaturePos
++#define GK_LARGE    1   // getLargeStructurePos (monument, mansion)
++#define GK_OUTPOST  2   // feature position + 1/5 attempt roll
++
++#define GK_MAX_CONDS 16
++
++typedef struct
++{
++    int salt;           // structure salt (int32, sign-extended like cubiomes)
++    int regionSize;     // in chunks
++    int chunkRange;     // in chunks
++    int kind;           // GK_*
++    int x1, z1, x2, z2; // search rectangle in blocks (inclusive)
++    int rx1, rz1, rx2, rz2; // region range (inclusive)
++    int count;          // required number of positions (>= 1)
++    int useRadius;      // 0: rectangle test, 1: circle test
++    ulong rmaxsq;       // squared radius (strict), only if useRadius
++} GkCond;
++
++// ---------------------------------------------------------------------------
++
++
++// Position of the structure candidate in region (rx,rz) in blocks.
++// Mirrors getFeaturePos / getLargeStructurePos from cubiomes exactly.
++static inline void gk_region_pos(const GkCond *c, ulong seed, int rx, int rz,
++                                 int *px, int *pz)
++{
++    const ulong K = 0x5deece66dUL;
++    const ulong M = (1UL << 48) - 1;
++    const ulong b = 0xbUL;
++    ulong r = (ulong) c->chunkRange;
++    int cx, cz;
++
++    seed = seed + (ulong)rx * 341873128712UL + (ulong)rz * 132897987541UL
++                + (ulong)c->salt;
++    seed = seed ^ K;
++
++    if (c->kind == GK_LARGE)
++    {
++        seed = (seed * K + b) & M;
++        cx = (int)((seed >> 17) % r);
++        seed = (seed * K + b) & M;
++        cx += (int)((seed >> 17) % r);
++
++        seed = (seed * K + b) & M;
++        cz = (int)((seed >> 17) % r);
++        seed = (seed * K + b) & M;
++        cz += (int)((seed >> 17) % r);
++
++        cx >>= 1;
++        cz >>= 1;
++    }
++    else
++    {
++        seed = (seed * K + b) & M;
++        if (r & (r - 1))
++        {
++            cx = (int)((seed >> 17) % r);
++            seed = (seed * K + b) & M;
++            cz = (int)((seed >> 17) % r);
++        }
++        else
++        {   // Java RNG treats powers of two specially
++            cx = (int)((r * (seed >> 17)) >> 31);
++            seed = (seed * K + b) & M;
++            cz = (int)((r * (seed >> 17)) >> 31);
++        }
++    }
++
++    *px = (int)(((ulong)rx * (ulong)c->regionSize + (ulong)cx) << 4);
++    *pz = (int)(((ulong)rz * (ulong)c->regionSize + (ulong)cz) << 4);
++}
++
++// Outpost: cubiomes rolls nextInt(5)==0 with the attempt seed of the position.
++static inline int gk_outpost_ok(ulong seed, int px, int pz)
++{
++    const ulong M = (1UL << 48) - 1;
++    ulong s = seed;
++    s ^= (ulong)(px >> 4 >> 4) ^ ((ulong)(pz >> 4 >> 4) << 4);
++    s = (s ^ 0x5deece66dUL) & M;                       // setSeed
++    s = (s * 0x5deece66dUL + 0xbUL) & M;               // next(31) (discarded)
++    s = (s * 0x5deece66dUL + 0xbUL) & M;               // next(31) for nextInt(5)
++    // nextInt(5): n is not a power of two -> rejection loop on bits % 5.
++    // The first draw decides ~always; to stay conservative we accept the
++    // candidate if the first draw is accepted as 0 OR rejected (retry).
++    int bits = (int)((slong)s >> 17);
++    int val = bits % 5;
++    if ((int)((uint)bits - (uint)val + 4u) < 0)
++        return 1;   // would re-roll: be conservative, keep the candidate
++    return val == 0;
++}
++
++static inline int gk_cond_passes(const GkCond *c, ulong seed)
++{
++    int found = 0;
++    for (int rz = c->rz1; rz <= c->rz2; rz++)
++    {
++        for (int rx = c->rx1; rx <= c->rx2; rx++)
++        {
++            int px, pz;
++            gk_region_pos(c, seed, rx, rz, &px, &pz);
++
++            if (c->useRadius)
++            {
++                slong dx = px, dz = pz;
++                ulong rsq = (ulong)(dx * dx + dz * dz);
++                if (rsq >= c->rmaxsq)
++                    continue;
++            }
++            else if (px < c->x1 || px > c->x2 || pz < c->z1 || pz > c->z2)
++                continue;
++
++            if (c->kind == GK_OUTPOST && !gk_outpost_ok(seed, px, pz))
++                continue;
++
++            if (++found >= c->count)
++                return 1;
++        }
++    }
++    return 0;
++}
++
++static inline int gk_seed_passes(const GkCond *conds, int n, ulong seed)
++{
++    for (int i = 0; i < n; i++)
++        if (!gk_cond_passes(&conds[i], seed))
++            return 0;
++    return 1;
++}
++
++#ifdef GK_OPENCL
++
++__kernel void gk_filter_range(
++    __constant GkCond *conds, int nconds,
++    ulong start, ulong total,
++    __global ulong *out, __global volatile uint *outcount, uint outcap)
++{
++    ulong gid = get_global_id(0);
++    if (gid >= total)
++        return;
++    GkCond lc[GK_MAX_CONDS];
++    for (int i = 0; i < nconds; i++)
++        lc[i] = conds[i];
++    ulong seed = start + gid;
++    if (gk_seed_passes(lc, nconds, seed))
++    {
++        uint idx = atomic_inc(outcount);
++        if (idx < outcap)
++            out[idx] = seed;
++    }
++}
++
++__kernel void gk_filter_list(
++    __constant GkCond *conds, int nconds,
++    __global const ulong *list, ulong total,
++    __global ulong *out, __global volatile uint *outcount, uint outcap)
++{
++    ulong gid = get_global_id(0);
++    if (gid >= total)
++        return;
++    GkCond lc[GK_MAX_CONDS];
++    for (int i = 0; i < nconds; i++)
++        lc[i] = conds[i];
++    ulong seed = list[gid];
++    if (gk_seed_passes(lc, nconds, seed))
++    {
++        uint idx = atomic_inc(outcount);
++        if (idx < outcap)
++            out[idx] = seed;
++    }
++}
++
++#endif
+diff --git a/src/gpusearch.cpp b/src/gpusearch.cpp
+new file mode 100644
+index 0000000..9bd57c1
+--- /dev/null
++++ b/src/gpusearch.cpp
+@@ -0,0 +1,570 @@
++#include "gpusearch.h"
++#include "cl_min.h"
++
++#include <QElapsedTimer>
++#include <QFile>
++#include <QLibrary>
++#include <QMutex>
++#include <QMutexLocker>
++
++#include <algorithm>
++#include <cstring>
++
++bool g_gpuSearchEnabled = true;
++
++// ---------------------------------------------------------------------------
++// Mirror of GkCond in gpukernel.cl (same field order, natural alignment).
++// ---------------------------------------------------------------------------
++namespace {
++
++enum { GK_FEATURE = 0, GK_LARGE = 1, GK_OUTPOST = 2 };
++const int GK_MAX_CONDS = 16;
++
++struct GpuCond
++{
++    cl_int salt;
++    cl_int regionSize;
++    cl_int chunkRange;
++    cl_int kind;
++    cl_int x1, z1, x2, z2;
++    cl_int rx1, rz1, rx2, rz2;
++    cl_int count;
++    cl_int useRadius;
++    cl_ulong rmaxsq;
++};
++static_assert(sizeof(GpuCond) == 64, "GpuCond must match GkCond in gpukernel.cl");
++
++// Structure types the kernel reproduces exactly (see tests/gpu_kernel_test.cpp).
++int kindOf(int stype)
++{
++    switch (stype)
++    {
++    case Desert_Pyramid:
++    case Jungle_Pyramid:
++    case Swamp_Hut:
++    case Igloo:
++    case Village:
++    case Ocean_Ruin:
++    case Shipwreck:
++    case Ruined_Portal:
++    case Ruined_Portal_N:
++    case Ancient_City:
++    case Trail_Ruins:
++    case Trial_Chambers:
++        return GK_FEATURE;
++    case Monument:
++    case Mansion:
++        return GK_LARGE;
++    case Outpost:
++        return GK_OUTPOST;
++    default:
++        return -1;
++    }
++}
++
++int64_t floordiv64(int64_t a, int64_t b)
++{
++    int64_t q = a / b;
++    if ((a % b != 0) && ((a < 0) != (b < 0)))
++        q--;
++    return q;
++}
++
++// Translates conditions directly below the root into GPU conditions.
++// Only conditions every matching seed must satisfy are used (root children
++// are combined with AND), and only the part that does not need biome
++// information (position inside the area, minimum count).
++std::vector<GpuCond> buildConds(const ConditionTree& tree, int mc)
++{
++    std::vector<GpuCond> conds;
++    if (tree.references.empty())
++        return conds;
++
++    for (char idx : tree.references[0])
++    {
++        if (idx <= 0 || (size_t)idx >= tree.condvec.size())
++            continue;
++        const Condition& c = tree.condvec[(size_t)idx];
++        if (c.type <= 0 || c.type >= FILTER_MAX)
++            continue;
++        const FilterInfo& fi = g_filterinfo.list[c.type];
++        if (fi.cat != CAT_STRUCT)
++            continue;
++        int kind = kindOf(fi.stype);
++        if (kind < 0)
++            continue;
++        if (c.count < 1)
++            continue; // exclusion filters cannot be prefiltered conservatively
++        if (mc < fi.mcmin || mc > fi.mcmax)
++            continue;
++
++        StructureConfig sc;
++        if (!getStructureConfig_override(fi.stype, mc, &sc))
++            continue;
++        if (sc.regionSize < 1 || sc.chunkRange < 1)
++            continue;
++
++        GpuCond g;
++        memset(&g, 0, sizeof(g));
++        g.salt = sc.salt;
++        g.regionSize = sc.regionSize;
++        g.chunkRange = sc.chunkRange;
++        g.kind = kind;
++        g.count = c.count;
++
++        // identical area derivation as testCondAt() with origin (0,0)
++        if (c.rmax > 0)
++        {
++            int64_t r = (int64_t)c.rmax - 1;
++            g.x1 = (cl_int)-r; g.z1 = (cl_int)-r;
++            g.x2 = (cl_int) r; g.z2 = (cl_int) r;
++            g.useRadius = 1;
++            g.rmaxsq = (cl_ulong)(r * r + 1);
++        }
++        else
++        {
++            g.x1 = c.x1; g.z1 = c.z1; g.x2 = c.x2; g.z2 = c.z2;
++        }
++
++        int64_t rs = (int64_t)sc.regionSize << 4;
++        g.rx1 = (cl_int)floordiv64(g.x1, rs);
++        g.rz1 = (cl_int)floordiv64(g.z1, rs);
++        g.rx2 = (cl_int)floordiv64(g.x2, rs);
++        g.rz2 = (cl_int)floordiv64(g.z2, rs);
++        if (g.rx2 < g.rx1 || g.rz2 < g.rz1)
++            continue;
++
++        // Skip areas so large that a single seed would take too long on the
++        // GPU (also protects against OS driver watchdog resets).
++        int64_t nreg = (int64_t)(g.rx2 - g.rx1 + 1) * (int64_t)(g.rz2 - g.rz1 + 1);
++        if (nreg > 20000)
++            continue;
++        if (nreg < g.count)
++            continue; // can never be satisfied; the CPU will say so quickly
++
++        conds.push_back(g);
++    }
++
++    // cheapest conditions first so most seeds are rejected early
++    std::stable_sort(conds.begin(), conds.end(), [](const GpuCond& a, const GpuCond& b) {
++        int64_t na = (int64_t)(a.rx2 - a.rx1 + 1) * (a.rz2 - a.rz1 + 1);
++        int64_t nb = (int64_t)(b.rx2 - b.rx1 + 1) * (b.rz2 - b.rz1 + 1);
++        return na < nb;
++    });
++    if ((int)conds.size() > GK_MAX_CONDS)
++        conds.resize(GK_MAX_CONDS);
++    return conds;
++}
++
++} // namespace
++
++// ---------------------------------------------------------------------------
++
++struct GpuFilter::Impl
++{
++    QMutex mutex;
++    QLibrary lib;
++    std::atomic<bool> ok{false};
++    std::atomic<bool> failed{false};
++    QString devname;
++    int nconds = 0;
++    uint64_t batch = 1u << 18;
++
++    PFN_clGetPlatformIDs          GetPlatformIDs = nullptr;
++    PFN_clGetDeviceIDs            GetDeviceIDs = nullptr;
++    PFN_clGetDeviceInfo           GetDeviceInfo = nullptr;
++    PFN_clCreateContext           CreateContext = nullptr;
++    PFN_clCreateCommandQueue      CreateCommandQueue = nullptr;
++    PFN_clCreateProgramWithSource CreateProgramWithSource = nullptr;
++    PFN_clBuildProgram            BuildProgram = nullptr;
++    PFN_clGetProgramBuildInfo     GetProgramBuildInfo = nullptr;
++    PFN_clCreateKernel            CreateKernel = nullptr;
++    PFN_clCreateBuffer            CreateBuffer = nullptr;
++    PFN_clEnqueueWriteBuffer      EnqueueWriteBuffer = nullptr;
++    PFN_clEnqueueReadBuffer       EnqueueReadBuffer = nullptr;
++    PFN_clEnqueueNDRangeKernel    EnqueueNDRangeKernel = nullptr;
++    PFN_clSetKernelArg            SetKernelArg = nullptr;
++    PFN_clFinish                  Finish = nullptr;
++    PFN_clReleaseMemObject        ReleaseMemObject = nullptr;
++    PFN_clReleaseKernel           ReleaseKernel = nullptr;
++    PFN_clReleaseProgram          ReleaseProgram = nullptr;
++    PFN_clReleaseCommandQueue     ReleaseCommandQueue = nullptr;
++    PFN_clReleaseContext          ReleaseContext = nullptr;
++
++    cl_context ctx = nullptr;
++    cl_command_queue queue = nullptr;
++    cl_program prog = nullptr;
++    cl_kernel kRange = nullptr;
++    cl_kernel kList = nullptr;
++    cl_mem bufConds = nullptr;
++    cl_mem bufOut = nullptr;
++    cl_mem bufCount = nullptr;
++    cl_mem bufList = nullptr;
++    size_t listCap = 0;
++    enum : cl_uint { outcap = 1u << 20 };
++
++    ~Impl() { cleanup(); }
++
++    void cleanup()
++    {
++        if (bufList) ReleaseMemObject(bufList);
++        if (bufCount) ReleaseMemObject(bufCount);
++        if (bufOut) ReleaseMemObject(bufOut);
++        if (bufConds) ReleaseMemObject(bufConds);
++        if (kList) ReleaseKernel(kList);
++        if (kRange) ReleaseKernel(kRange);
++        if (prog) ReleaseProgram(prog);
++        if (queue) ReleaseCommandQueue(queue);
++        if (ctx) ReleaseContext(ctx);
++        bufList = bufCount = bufOut = bufConds = nullptr;
++        kList = kRange = nullptr;
++        prog = nullptr; queue = nullptr; ctx = nullptr;
++        ok = false;
++    }
++
++    template<typename F> bool load(F& fn, const char *name)
++    {
++        fn = reinterpret_cast<F>(lib.resolve(name));
++        return fn != nullptr;
++    }
++
++    bool loadLibrary(QString *err)
++    {
++        const char *names[] = { "OpenCL", "libOpenCL.so.1", "OpenCL.dll", "/System/Library/Frameworks/OpenCL.framework/OpenCL" };
++        for (const char *n : names)
++        {
++            lib.setFileName(QString::fromLatin1(n));
++            if (lib.load())
++                break;
++        }
++        if (!lib.isLoaded())
++        {
++            *err = "no OpenCL driver found";
++            return false;
++        }
++        bool all =
++            load(GetPlatformIDs, "clGetPlatformIDs") &&
++            load(GetDeviceIDs, "clGetDeviceIDs") &&
++            load(GetDeviceInfo, "clGetDeviceInfo") &&
++            load(CreateContext, "clCreateContext") &&
++            load(CreateCommandQueue, "clCreateCommandQueue") &&
++            load(CreateProgramWithSource, "clCreateProgramWithSource") &&
++            load(BuildProgram, "clBuildProgram") &&
++            load(GetProgramBuildInfo, "clGetProgramBuildInfo") &&
++            load(CreateKernel, "clCreateKernel") &&
++            load(CreateBuffer, "clCreateBuffer") &&
++            load(EnqueueWriteBuffer, "clEnqueueWriteBuffer") &&
++            load(EnqueueReadBuffer, "clEnqueueReadBuffer") &&
++            load(EnqueueNDRangeKernel, "clEnqueueNDRangeKernel") &&
++            load(SetKernelArg, "clSetKernelArg") &&
++            load(Finish, "clFinish") &&
++            load(ReleaseMemObject, "clReleaseMemObject") &&
++            load(ReleaseKernel, "clReleaseKernel") &&
++            load(ReleaseProgram, "clReleaseProgram") &&
++            load(ReleaseCommandQueue, "clReleaseCommandQueue") &&
++            load(ReleaseContext, "clReleaseContext");
++        if (!all)
++        {
++            *err = "incomplete OpenCL driver";
++            return false;
++        }
++        return true;
++    }
++
++    // Picks the GPU with the most compute units.
++    bool pickDevice(cl_platform_id *plat, cl_device_id *dev, QString *name)
++    {
++        cl_uint np = 0;
++        if (GetPlatformIDs(0, nullptr, &np) != CL_SUCCESS || np == 0)
++            return false;
++        std::vector<cl_platform_id> plats(np);
++        if (GetPlatformIDs(np, plats.data(), nullptr) != CL_SUCCESS)
++            return false;
++
++        cl_uint best = 0;
++        bool found = false;
++        for (cl_platform_id p : plats)
++        {
++            cl_uint nd = 0;
++            if (GetDeviceIDs(p, CL_DEVICE_TYPE_GPU, 0, nullptr, &nd) != CL_SUCCESS || nd == 0)
++                continue;
++            std::vector<cl_device_id> devs(nd);
++            if (GetDeviceIDs(p, CL_DEVICE_TYPE_GPU, nd, devs.data(), nullptr) != CL_SUCCESS)
++                continue;
++            for (cl_device_id dv : devs)
++            {
++                cl_bool avail = 0, comp = 0;
++                GetDeviceInfo(dv, CL_DEVICE_AVAILABLE, sizeof(avail), &avail, nullptr);
++                GetDeviceInfo(dv, CL_DEVICE_COMPILER_AVAILABLE, sizeof(comp), &comp, nullptr);
++                if (!avail || !comp)
++                    continue;
++                cl_uint cu = 0;
++                GetDeviceInfo(dv, CL_DEVICE_MAX_COMPUTE_UNITS, sizeof(cu), &cu, nullptr);
++                cl_bool unified = 0; // prefer discrete GPUs on a tie
++                GetDeviceInfo(dv, CL_DEVICE_HOST_UNIFIED_MEMORY, sizeof(unified), &unified, nullptr);
++                cl_uint score = cu * 2 + (unified ? 0 : 1);
++                if (!found || score > best)
++                {
++                    best = score;
++                    found = true;
++                    *plat = p;
++                    *dev = dv;
++                    char buf[256] = {0};
++                    GetDeviceInfo(dv, CL_DEVICE_NAME, sizeof(buf) - 1, buf, nullptr);
++                    *name = QString::fromLatin1(buf).trimmed();
++                }
++            }
++        }
++        return found;
++    }
++
++    bool setup(const std::vector<GpuCond>& conds, QString *err)
++    {
++        if (!loadLibrary(err))
++            return false;
++
++        cl_platform_id plat = nullptr;
++        cl_device_id dev = nullptr;
++        if (!pickDevice(&plat, &dev, &devname))
++        {
++            *err = "no OpenCL GPU found";
++            return false;
++        }
++
++        cl_int e = 0;
++        cl_context_properties props[] = { CL_CONTEXT_PLATFORM, (cl_context_properties)plat, 0 };
++        ctx = CreateContext(props, 1, &dev, nullptr, nullptr, &e);
++        if (e != CL_SUCCESS || !ctx) { *err = "clCreateContext failed"; return false; }
++        queue = CreateCommandQueue(ctx, dev, 0, &e);
++        if (e != CL_SUCCESS || !queue) { *err = "clCreateCommandQueue failed"; return false; }
++
++        QFile f(":/gpu/gpukernel.cl");
++        if (!f.open(QIODevice::ReadOnly))
++        {
++            *err = "GPU kernel resource missing";
++            return false;
++        }
++        QByteArray src = f.readAll();
++        const char *sp = src.constData();
++        size_t sl = (size_t)src.size();
++        prog = CreateProgramWithSource(ctx, 1, &sp, &sl, &e);
++        if (e != CL_SUCCESS || !prog) { *err = "clCreateProgramWithSource failed"; return false; }
++        e = BuildProgram(prog, 1, &dev, "-DGK_OPENCL -cl-std=CL1.2", nullptr, nullptr);
++        if (e != CL_SUCCESS)
++        {
++            size_t n = 0;
++            GetProgramBuildInfo(prog, dev, CL_PROGRAM_BUILD_LOG, 0, nullptr, &n);
++            QByteArray log(n ? (int)n : 1, 0);
++            GetProgramBuildInfo(prog, dev, CL_PROGRAM_BUILD_LOG, n, log.data(), nullptr);
++            *err = "GPU kernel build failed: " + QString::fromLatin1(log).left(300);
++            return false;
++        }
++        kRange = CreateKernel(prog, "gk_filter_range", &e);
++        if (e != CL_SUCCESS || !kRange) { *err = "kernel gk_filter_range missing"; return false; }
++        kList = CreateKernel(prog, "gk_filter_list", &e);
++        if (e != CL_SUCCESS || !kList) { *err = "kernel gk_filter_list missing"; return false; }
++
++        nconds = (int)conds.size();
++        bufConds = CreateBuffer(ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
++                                conds.size() * sizeof(GpuCond), (void*)conds.data(), &e);
++        if (e != CL_SUCCESS || !bufConds) { *err = "buffer allocation failed"; return false; }
++        bufOut = CreateBuffer(ctx, CL_MEM_READ_WRITE, (size_t)outcap * sizeof(cl_ulong), nullptr, &e);
++        if (e != CL_SUCCESS || !bufOut) { *err = "buffer allocation failed"; return false; }
++        bufCount = CreateBuffer(ctx, CL_MEM_READ_WRITE, sizeof(cl_uint), nullptr, &e);
++        if (e != CL_SUCCESS || !bufCount) { *err = "buffer allocation failed"; return false; }
++        ok = true;
++        return true;
++    }
++
++    // One launch over 'total' items. For the list kernel 'start' is unused and
++    // the list buffer must already hold the items.
++    // Returns the number of survivors (may exceed outcap) or -1 on error.
++    long launch(bool isList, uint64_t start, uint64_t total, std::vector<uint64_t>& out)
++    {
++        cl_kernel k = isList ? kList : kRange;
++        cl_uint zero = 0;
++        cl_int e = EnqueueWriteBuffer(queue, bufCount, CL_TRUE, 0, sizeof(zero), &zero, 0, nullptr, nullptr);
++        if (e != CL_SUCCESS) return -1;
++
++        cl_int nc = nconds;
++        cl_ulong ctot = total;
++        cl_ulong cstart = start;
++        cl_uint cap = outcap;
++        cl_uint a = 0;
++        e  = SetKernelArg(k, a++, sizeof(cl_mem), &bufConds);
++        e |= SetKernelArg(k, a++, sizeof(nc), &nc);
++        if (isList) e |= SetKernelArg(k, a++, sizeof(cl_mem), &bufList);
++        else        e |= SetKernelArg(k, a++, sizeof(cstart), &cstart);
++        e |= SetKernelArg(k, a++, sizeof(ctot), &ctot);
++        e |= SetKernelArg(k, a++, sizeof(cl_mem), &bufOut);
++        e |= SetKernelArg(k, a++, sizeof(cl_mem), &bufCount);
++        e |= SetKernelArg(k, a++, sizeof(cap), &cap);
++        if (e != CL_SUCCESS) return -1;
++
++        size_t gws = (size_t)total;
++        e = EnqueueNDRangeKernel(queue, k, 1, nullptr, &gws, nullptr, 0, nullptr, nullptr);
++        if (e != CL_SUCCESS) return -1;
++
++        cl_uint cnt = 0;
++        e = EnqueueReadBuffer(queue, bufCount, CL_TRUE, 0, sizeof(cnt), &cnt, 0, nullptr, nullptr);
++        if (e != CL_SUCCESS) return -1;
++
++        cl_uint n = cnt < outcap ? cnt : outcap;
++        if (n && cnt <= outcap)
++        {
++            size_t old = out.size();
++            out.resize(old + n);
++            e = EnqueueReadBuffer(queue, bufOut, CL_TRUE, 0, n * sizeof(cl_ulong), out.data() + old, 0, nullptr, nullptr);
++            if (e != CL_SUCCESS) return -1;
++        }
++        return (long)cnt;
++    }
++
++    bool ensureList(size_t n)
++    {
++        if (bufList && listCap >= n)
++            return true;
++        if (bufList) { ReleaseMemObject(bufList); bufList = nullptr; }
++        cl_int e = 0;
++        bufList = CreateBuffer(ctx, CL_MEM_READ_ONLY, n * sizeof(cl_ulong), nullptr, &e);
++        if (e != CL_SUCCESS || !bufList) { bufList = nullptr; return false; }
++        listCap = n;
++        return true;
++    }
++
++    // Range launch with automatic splitting on survivor-buffer overflow.
++    bool runRange(uint64_t start, uint64_t total, std::vector<uint64_t>& out, int depth = 0)
++    {
++        size_t before = out.size();
++        long n = launch(false, start, total, out);
++        if (n < 0)
++            return false;
++        if ((unsigned long)n > outcap)
++        {
++            out.resize(before);
++            if (total < 2 || depth > 40)
++                return false;
++            uint64_t h = total / 2;
++            return runRange(start, h, out, depth + 1) &&
++                   runRange(start + h, total - h, out, depth + 1);
++        }
++        return true;
++    }
++
++    bool runList(const uint64_t *list, uint64_t total, std::vector<uint64_t>& out, int depth = 0)
++    {
++        if (!ensureList((size_t)total))
++            return false;
++        cl_int e = EnqueueWriteBuffer(queue, bufList, CL_TRUE, 0, (size_t)total * sizeof(cl_ulong), list, 0, nullptr, nullptr);
++        if (e != CL_SUCCESS)
++            return false;
++        size_t before = out.size();
++        long n = launch(true, 0, total, out);
++        if (n < 0)
++            return false;
++        if ((unsigned long)n > outcap)
++        {
++            out.resize(before);
++            if (total < 2 || depth > 40)
++                return false;
++            uint64_t h = total / 2;
++            return runList(list, h, out, depth + 1) &&
++                   runList(list + h, total - h, out, depth + 1);
++        }
++        return true;
++    }
++
++    // keeps single launches around 20-80 ms to stay clear of OS GPU watchdogs
++    void adapt(qint64 ns)
++    {
++        if (ns < 20000000 && batch < (1u << 24))
++            batch *= 2;
++        else if (ns > 80000000 && batch > 4096)
++            batch /= 2;
++    }
++};
++
++// ---------------------------------------------------------------------------
++
++GpuFilter::GpuFilter() : d(new Impl) {}
++GpuFilter::~GpuFilter() { delete d; }
++
++bool GpuFilter::init(const ConditionTree& tree, int mc, QString *info)
++{
++    QString err;
++    std::vector<GpuCond> conds = buildConds(tree, mc);
++    if (conds.empty())
++    {
++        if (info) *info = "no GPU-accelerable structure conditions";
++        return false;
++    }
++    if (!d->setup(conds, &err))
++    {
++        d->cleanup();
++        d->failed = true;
++        if (info) *info = err;
++        return false;
++    }
++    if (info) *info = d->devname;
++    return true;
++}
++
++bool GpuFilter::ready() const { return d->ok && !d->failed; }
++QString GpuFilter::deviceName() const { return d->devname; }
++int GpuFilter::conditionCount() const { return d->nconds; }
++uint64_t GpuFilter::batchHint() const { return d->batch; }
++
++bool GpuFilter::filterRange(uint64_t start, uint64_t count,
++                            std::vector<uint64_t>& out, const std::atomic_bool *stop)
++{
++    out.clear();
++    QMutexLocker lock(&d->mutex);
++    if (!ready())
++        return false;
++    uint64_t done = 0;
++    while (done < count)
++    {
++        if (stop && *stop)
++            return true; // caller checks stop itself
++        uint64_t n = std::min<uint64_t>(count - done, d->batch);
++        QElapsedTimer t;
++        t.start();
++        if (!d->runRange(start + done, n, out))
++        {
++            d->failed = true;
++            out.clear();
++            return false;
++        }
++        d->adapt(t.nsecsElapsed());
++        done += n;
++    }
++    std::sort(out.begin(), out.end());
++    return true;
++}
++
++bool GpuFilter::filterList(const uint64_t *list, uint64_t count,
++                           std::vector<uint64_t>& out, const std::atomic_bool *stop)
++{
++    out.clear();
++    QMutexLocker lock(&d->mutex);
++    if (!ready())
++        return false;
++    uint64_t done = 0;
++    while (done < count)
++    {
++        if (stop && *stop)
++            return true;
++        uint64_t n = std::min<uint64_t>(count - done, d->batch);
++        QElapsedTimer t;
++        t.start();
++        if (!d->runList(list + done, n, out))
++        {
++            d->failed = true;
++            out.clear();
++            return false;
++        }
++        d->adapt(t.nsecsElapsed());
++        done += n;
++    }
++    return true;
++}
+diff --git a/src/gpusearch.h b/src/gpusearch.h
+new file mode 100644
+index 0000000..aa50048
+--- /dev/null
++++ b/src/gpusearch.h
+@@ -0,0 +1,58 @@
++#ifndef GPUSEARCH_H
++#define GPUSEARCH_H
++
++#include "search.h"
++
++#include <QString>
++#include <atomic>
++#include <cstdint>
++#include <vector>
++
++// Global on/off switch (set from the preferences, default on).
++extern bool g_gpuSearchEnabled;
++
++// GPU prefilter for seed searches (OpenCL, loaded at runtime).
++//
++// The GPU evaluates a necessary condition for the structure filters that sit
++// directly below the root of the condition tree. Every seed it lets through is
++// still verified by the exact CPU code, so search results are identical to a
++// CPU-only search; the GPU only skips seeds that cannot match.
++class GpuFilter
++{
++public:
++    GpuFilter();
++    ~GpuFilter();
++
++    GpuFilter(const GpuFilter&) = delete;
++    GpuFilter& operator=(const GpuFilter&) = delete;
++
++    // Prepares the device and kernel for the given (already applied) condition
++    // tree. Returns false when no usable GPU/driver exists or none of the
++    // conditions can be prefiltered; 'info' receives a short description either
++    // way (device name, or the reason for not using the GPU).
++    bool init(const ConditionTree& tree, int mc, QString *info);
++
++    bool ready() const;
++    QString deviceName() const;
++    int conditionCount() const;
++
++    // Collects the seeds in [start, start+count) that pass the GPU prefilter,
++    // in ascending order. The range must not wrap around 2^64.
++    // Returns false on a device error (the GPU is then disabled for good and
++    // the caller must examine the whole range on the CPU).
++    bool filterRange(uint64_t start, uint64_t count,
++                     std::vector<uint64_t>& out, const std::atomic_bool *stop);
++
++    // Same for an explicit list of seeds (order of the list is preserved).
++    bool filterList(const uint64_t *list, uint64_t count,
++                    std::vector<uint64_t>& out, const std::atomic_bool *stop);
++
++    // Number of seeds per GPU launch that currently keeps launches short.
++    uint64_t batchHint() const;
++
++private:
++    struct Impl;
++    Impl *d;
++};
++
++#endif // GPUSEARCH_H
+diff --git a/src/headless.cpp b/src/headless.cpp
+index aaf1f7b..4883309 100644
+--- a/src/headless.cpp
++++ b/src/headless.cpp
+@@ -1,4 +1,5 @@
+ #include "headless.h"
++#include "gpusearch.h"
+ 
+ #include "message.h"
+ #include "util.h"
+@@ -49,6 +50,7 @@ Headless::Headless(QString sessionpath, QString resultspath, bool reset, QObject
+ 
+     QSettings settings(APP_STRING, APP_STRING);
+     g_extgen.load(settings);
++    g_gpuSearchEnabled = settings.value("config/gpuSearch", true).toBool();
+ 
+     if (!loadSession(sessionpath, reset))
+         return;
+diff --git a/src/mainwindow.cpp b/src/mainwindow.cpp
+index 68e7a3f..01ef447 100644
+--- a/src/mainwindow.cpp
++++ b/src/mainwindow.cpp
+@@ -6,6 +6,7 @@
+ #include "configdialog.h"
+ #include "exportdialog.h"
+ #include "extgendialog.h"
++#include "gpusearch.h"
+ #include "layerdialog.h"
+ #include "maptoolsdialog.h"
+ #include "message.h"
+@@ -1167,6 +1168,7 @@ void MainWindow::onUpdateConfig()
+ {
+     Config old = config;
+     config.load();
++    g_gpuSearchEnabled = config.gpuSearch;
+ 
+     if (old.lang != config.lang)
+     {
+diff --git a/src/searchthread.cpp b/src/searchthread.cpp
+index fbd282f..027c552 100644
+--- a/src/searchthread.cpp
++++ b/src/searchthread.cpp
+@@ -140,6 +140,9 @@ SearchMaster::SearchMaster(QWidget *parent)
+     , large()
+     , condtree()
+     , itemsize()
++    , itemmax(0x10000)
++    , gpu()
++    , gpuinfo()
+     , threadcnt()
+     , gen48()
+     , slist()
+@@ -566,6 +569,33 @@ void SearchMaster::preSearch()
+             prog = (seed << 16) | (seed >> 48);
+         }
+     }
++
++    // optional GPU prefilter: only for plain 64-bit seed ranges and 64-bit
++    // seed lists, where the GPU can test the seeds directly
++    gpu.reset();
++    gpuinfo.clear();
++    itemmax = 0x10000;
++    if (g_gpuSearchEnabled)
++    {
++        bool plainrange = (searchtype == SEARCH_INC && slist.empty());
++        bool seedlist = (searchtype == SEARCH_LIST && !slist.empty());
++        if (plainrange || seedlist)
++        {
++            std::unique_ptr<GpuFilter> g(new GpuFilter());
++            QString info;
++            if (g->init(condtree, mc, &info))
++            {
++                gpu = std::move(g);
++                gpuinfo = info;
++                itemmax = 1 << 22;
++                itemsize = 1 << 16;
++            }
++            else
++                gpuinfo = info;
++        }
++        else
++            gpuinfo = QStringLiteral("this search mode runs on the CPU");
++    }
+ }
+ 
+ void SearchMaster::startSearch()
+@@ -755,12 +785,18 @@ bool SearchMaster::getProgress(QString *status, uint64_t *prog, uint64_t *end, u
+         else
+             eta = QString("%1:%2").arg(s / 60).arg(s % 60, 2, 10, QLatin1Char('0'));
+     }
+-    *status = QString("seeds/sec: %1 min: %2 max: %3 isize: %4 eta: %5")
++    QString dev;
++    if (gpu && gpu->ready())
++        dev = QString(" [GPU: %1]").arg(gpuinfo);
++    else if (g_gpuSearchEnabled && !gpuinfo.isEmpty())
++        dev = QString(" [CPU: %1]").arg(gpuinfo);
++    *status = QString("seeds/sec: %1 min: %2 max: %3 isize: %4 eta: %5%6")
+         .arg(getAbbrNum(*avg), -8)
+         .arg(getAbbrNum(*min), -8)
+         .arg(getAbbrNum(*max), -8)
+         .arg(itemsize, -3)
+-        .arg(eta);
++        .arg(eta)
++        .arg(dev);
+ 
+     return valid;
+ }
+@@ -779,7 +815,7 @@ bool SearchMaster::requestItem(SearchWorker *item)
+     {
+         if (count < 1e2 && itemsize > 1)
+             itemsize /= 2;
+-        if (count > 1e3 && itemsize < 0x10000)
++        if (count > 1e3 && itemsize < itemmax)
+             itemsize *= 2;
+         itemtimer.start();
+         count = 0;
+@@ -934,6 +970,11 @@ SearchWorker::~SearchWorker()
+ {
+ }
+ 
++bool SearchWorker::gpuReady() const
++{
++    return master->gpu && master->gpu->ready();
++}
++
+ bool SearchWorker::getNextItem()
+ {
+     QMutexLocker locker(&master->mutex);
+@@ -951,6 +992,27 @@ void SearchWorker::run()
+         while (!*env.stop && getNextItem())
+         {   // seed = slist[..]
+             uint64_t ie = idx+scnt < len ? idx+scnt : len;
++            if (gpuReady())
++            {   // the GPU drops seeds that cannot match; the CPU verifies the rest
++                survivors.clear();
++                if (master->gpu->filterList(slist + idx, ie - idx, survivors, env.stop))
++                {
++                    for (uint64_t s : survivors)
++                    {
++                        if (*env.stop)
++                            break;
++                        seed = s;
++                        env.setSeed(seed);
++                        if (testTreeAt(origin, &env, PASS_FULL_64, nullptr) == COND_OK)
++                        {
++                            if (!*env.stop)
++                                emit result(seed);
++                        }
++                    }
++                    continue;
++                }
++                // device error: fall through and process this item on the CPU
++            }
+             for (uint64_t i = idx; i < ie; i++)
+             {
+                 seed = slist[i];
+@@ -1037,6 +1099,30 @@ void SearchWorker::run()
+             else
+             {   // seed++
+                 seed = sstart;
++                if (gpuReady() && scnt > 0)
++                {
++                    uint64_t n = (uint64_t) scnt;
++                    if (n - 1 > ~sstart) // never wrap around 2^64
++                        n = ~sstart + 1;
++                    survivors.clear();
++                    if (master->gpu->filterRange(sstart, n, survivors, env.stop))
++                    {
++                        for (uint64_t s : survivors)
++                        {
++                            if (*env.stop)
++                                break;
++                            seed = s;
++                            env.setSeed(seed);
++                            if (testTreeAt(origin, &env, PASS_FULL_64, nullptr) == COND_OK)
++                            {
++                                if (!*env.stop)
++                                    emit result(seed);
++                            }
++                        }
++                        continue;
++                    }
++                    // device error: process this item on the CPU instead
++                }
+                 for (int i = 0; i < scnt; i++)
+                 {
+                     env.setSeed(seed);
+diff --git a/src/searchthread.h b/src/searchthread.h
+index 6293585..91493ad 100644
+--- a/src/searchthread.h
++++ b/src/searchthread.h
+@@ -2,6 +2,7 @@
+ #define SEARCHTHREAD_H
+ 
+ #include "search.h"
++#include "gpusearch.h"
+ #include "config.h"
+ 
+ #include <QThread>
+@@ -12,6 +13,7 @@
+ #include <QMessageBox>
+ 
+ #include <deque>
++#include <memory>
+ 
+ struct Session
+ {
+@@ -83,6 +85,9 @@ public:
+     int                         large;
+     ConditionTree               condtree;
+     int                         itemsize;   // number of seeds per search item
++    int                         itemmax;    // upper limit for itemsize
++    std::unique_ptr<GpuFilter>  gpu;        // optional GPU prefilter (may be null)
++    QString                     gpuinfo;    // GPU device name or reason it is not used
+     int                         threadcnt;  // numbr of worker threads
+     Gen48Config                 gen48;      // 48-bit generator settings
+     std::vector<uint64_t>       slist;      // candidate list
+@@ -104,6 +109,7 @@ public:
+     ~SearchWorker();
+ 
+     bool getNextItem();
++    bool gpuReady() const;
+     virtual void run() override;
+ 
+ signals:
+@@ -126,6 +132,7 @@ public:
+ 
+ private:
+     SearchThreadEnv     env;
++    std::vector<uint64_t> survivors;    // seeds that passed the GPU prefilter
+ };
+ 
+ 
+diff --git a/tests/gpu_host_test.cpp b/tests/gpu_host_test.cpp
+new file mode 100644
+index 0000000..ac27222
+--- /dev/null
++++ b/tests/gpu_host_test.cpp
+@@ -0,0 +1,146 @@
++// Exercises GpuFilter (src/gpusearch.cpp) end to end against a mock OpenCL
++// driver and compares the survivors with a brute-force cubiomes reference.
++#include "search.h"
++#include "gpusearch.h"
++#include <algorithm>
++#include <cstdio>
++#include <random>
++#include <set>
++
++extern "C" int getStructureConfig_override(int stype, int mc, StructureConfig *sconf)
++{ return getStructureConfig(stype, mc, sconf); }
++
++ConditionTree::~ConditionTree() {}
++
++static Condition mk(int type, int x1, int z1, int x2, int z2, int count, int relative, int save)
++{
++    Condition c; memset(&c, 0, sizeof(c));
++    c.type = type; c.x1 = x1; c.z1 = z1; c.x2 = x2; c.z2 = z2;
++    c.count = count; c.relative = relative; c.save = save;
++    return c;
++}
++
++static int floordivi(int a, int b) { int q = a / b; if ((a % b) && ((a < 0) != (b < 0))) q--; return q; }
++
++// reference for one root condition (same semantics as the CPU search before biome checks)
++static bool refCond(const Condition& c, int mc, uint64_t seed)
++{
++    const FilterInfo& fi = g_filterinfo.list[c.type];
++    StructureConfig sc; getStructureConfig(fi.stype, mc, &sc);
++    int rs = sc.regionSize << 4, cnt = 0;
++    for (int rz = floordivi(c.z1, rs); rz <= floordivi(c.z2, rs); rz++)
++        for (int rx = floordivi(c.x1, rs); rx <= floordivi(c.x2, rs); rx++)
++        {
++            Pos p;
++            if (!getStructurePos(fi.stype, mc, seed, rx, rz, &p)) continue;
++            if (p.x < c.x1 || p.x > c.x2 || p.z < c.z1 || p.z > c.z2) continue;
++            cnt++;
++        }
++    return cnt >= c.count;
++}
++
++static int fails = 0;
++#define CHECK(cond, ...) do { if (!(cond)) { printf("FAIL: " __VA_ARGS__); printf("\n"); fails++; } } while (0)
++
++int main()
++{
++    const int mc = MC_1_18;
++    ConditionTree tree;
++    tree.condvec.resize(8);
++    tree.references.resize(8);
++    tree.condvec[0] = mk(F_SELECT, 0,0,0,0, 0, 0, 0);
++    tree.condvec[1] = mk(F_VILLAGE,  -350,-350, 350, 350, 3, 0, 1);   // used
++    tree.condvec[2] = mk(F_MONUMENT, -450,-450, 450, 450, 1, 0, 2);   // used
++    tree.condvec[3] = mk(F_OUTPOST,   -500, -500,  500,  500, 2, 1, 3);   // child of 1: ignored
++    tree.condvec[4] = mk(F_HUT,       -500, -500,  500,  500, 0, 0, 4);   // exclusion: ignored
++    tree.condvec[5] = mk(F_BIOME,     -500, -500,  500,  500, 1, 0, 5);   // biome filter: ignored
++    tree.references[0] = {1, 2, 4, 5};
++    tree.references[1] = {3};
++
++    GpuFilter gf;
++    QString info;
++    CHECK(gf.init(tree, mc, &info), "init failed: %s", info.c_str());
++    printf("device: %s, conditions on GPU: %d\n", gf.deviceName().c_str(), gf.conditionCount());
++    CHECK(gf.conditionCount() == 2, "expected 2 GPU conditions, got %d", gf.conditionCount());
++
++    // 1) consecutive range vs brute force
++    {
++        uint64_t base = 0xfedcba9876543210ULL, n = 400000;
++        std::vector<uint64_t> got;
++        CHECK(gf.filterRange(base, n, got, nullptr), "filterRange failed");
++        CHECK(std::is_sorted(got.begin(), got.end()), "range result not sorted");
++        std::set<uint64_t> exp;
++        for (uint64_t i = 0; i < n; i++)
++        {
++            uint64_t s = base + i;
++            if (refCond(tree.condvec[1], mc, s) && refCond(tree.condvec[2], mc, s)) exp.insert(s);
++        }
++        std::set<uint64_t> gs(got.begin(), got.end());
++        CHECK(gs == exp, "range survivors differ: got %zu expected %zu", gs.size(), exp.size());
++        printf("range: %zu/%llu seeds survive (exact match with reference)\n", exp.size(), (unsigned long long)n);
++        CHECK(!exp.empty() && exp.size() < n / 2, "test is not selective enough");
++    }
++
++    // 2) low 48-bit range crossing 0 boundary of the counter (start at 0)
++    {
++        std::vector<uint64_t> got;
++        CHECK(gf.filterRange(0, 100000, got, nullptr), "filterRange(0) failed");
++        std::set<uint64_t> exp;
++        for (uint64_t s = 0; s < 100000; s++)
++            if (refCond(tree.condvec[1], mc, s) && refCond(tree.condvec[2], mc, s)) exp.insert(s);
++        CHECK(std::set<uint64_t>(got.begin(), got.end()) == exp, "range-from-0 differs");
++    }
++
++    // 3) explicit list (shuffled)
++    {
++        std::mt19937_64 rng(7);
++        std::vector<uint64_t> list(150000);
++        for (auto& s : list) s = rng();
++        std::vector<uint64_t> got;
++        CHECK(gf.filterList(list.data(), list.size(), got, nullptr), "filterList failed");
++        std::set<uint64_t> exp;
++        for (uint64_t s : list)
++            if (refCond(tree.condvec[1], mc, s) && refCond(tree.condvec[2], mc, s)) exp.insert(s);
++        CHECK(std::set<uint64_t>(got.begin(), got.end()) == exp, "list survivors differ");
++        printf("list: %zu/%zu survive\n", exp.size(), list.size());
++    }
++
++    // 4) survivor-buffer overflow: nearly everything passes (> 2^20 survivors per launch)
++    {
++        ConditionTree t2;
++        t2.condvec.resize(2); t2.references.resize(2);
++        t2.condvec[0] = mk(F_SELECT, 0,0,0,0, 0, 0, 0);
++        t2.condvec[1] = mk(F_VILLAGE, -6000,-6000, 6000, 6000, 1, 0, 1);
++        t2.references[0] = {1};
++        GpuFilter g2; QString i2;
++        CHECK(g2.init(t2, mc, &i2), "init2 failed: %s", i2.c_str());
++        uint64_t n = (1u << 21) + 12345, base = 5000000000ULL;
++        std::vector<uint64_t> got;
++        CHECK(g2.filterRange(base, n, got, nullptr), "overflow range failed");
++        std::set<uint64_t> gs(got.begin(), got.end());
++        CHECK(gs.size() == got.size(), "duplicates after overflow split");
++        size_t exp = 0, miss = 0;
++        for (uint64_t i = 0; i < n; i++)
++        {
++            bool r = refCond(t2.condvec[1], mc, base + i);
++            exp += r;
++            if (r && !gs.count(base + i)) miss++;
++        }
++        CHECK(gs.size() == exp && miss == 0, "overflow case: got %zu expected %zu missing %zu", gs.size(), exp, miss);
++        printf("overflow split: %zu survivors, exact\n", exp);
++    }
++
++    // 5) tree without usable conditions
++    {
++        ConditionTree t3; t3.condvec.resize(2); t3.references.resize(2);
++        t3.condvec[0] = mk(F_SELECT, 0,0,0,0, 0, 0, 0);
++        t3.condvec[1] = mk(F_BIOME, 0,0,10,10, 1, 0, 1);
++        t3.references[0] = {1};
++        GpuFilter g3; QString i3;
++        CHECK(!g3.init(t3, mc, &i3), "init should refuse a tree with nothing to prefilter");
++        printf("no-op tree: \"%s\"\n", i3.c_str());
++    }
++
++    printf(fails ? "RESULT: %d failure(s)\n" : "RESULT: all host tests passed\n", fails);
++    return fails ? 1 : 0;
++}
+diff --git a/tests/gpu_kernel_test.cpp b/tests/gpu_kernel_test.cpp
+new file mode 100644
+index 0000000..829ee85
+--- /dev/null
++++ b/tests/gpu_kernel_test.cpp
+@@ -0,0 +1,162 @@
++// Verifies the OpenCL prefilter kernel logic (src/gpukernel.cl) on the CPU by
++// including it as C++ and comparing against cubiomes' getStructurePos.
++//
++//   exact kinds (feature/large): kernel result must equal reference result
++//   outpost: kernel must never reject a seed the reference accepts
++//
++// Build/run: see tests/run_gpu_kernel_test.sh
++
++#include <cstdint>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <random>
++
++extern "C" {
++#include "../cubiomes/finders.h"
++}
++
++// ---- shim for OpenCL C types/qualifiers --------------------------------
++typedef uint64_t ulong;
++typedef int64_t  slong;
++typedef uint32_t uint;
++#define __constant
++#define __global
++#define __kernel
++#include "../src/gpukernel.cl"
++static_assert(sizeof(GkCond) == 64, "GkCond layout must match host GpuCond");
++
++static int refCount(int st, int mc, uint64_t seed, const GkCond& c)
++{
++    int cnt = 0;
++    for (int rz = c.rz1; rz <= c.rz2; rz++)
++    {
++        for (int rx = c.rx1; rx <= c.rx2; rx++)
++        {
++            Pos p;
++            if (!getStructurePos(st, mc, seed, rx, rz, &p))
++                continue;
++            if (c.useRadius)
++            {
++                int64_t rsq = p.x * (int64_t)p.x + p.z * (int64_t)p.z;
++                if (rsq >= (int64_t)c.rmaxsq)
++                    continue;
++            }
++            else if (p.x < c.x1 || p.x > c.x2 || p.z < c.z1 || p.z > c.z2)
++                continue;
++            cnt++;
++        }
++    }
++    return cnt;
++}
++
++static int floordivi(int a, int b)
++{
++    int q = a / b;
++    if ((a % b != 0) && ((a < 0) != (b < 0)))
++        q--;
++    return q;
++}
++
++int main()
++{
++    struct T { int st; int kind; const char *name; };
++    const T types[] = {
++        { Desert_Pyramid, GK_FEATURE, "desert" },
++        { Jungle_Pyramid, GK_FEATURE, "jungle" },
++        { Swamp_Hut,      GK_FEATURE, "hut" },
++        { Igloo,          GK_FEATURE, "igloo" },
++        { Village,        GK_FEATURE, "village" },
++        { Ocean_Ruin,     GK_FEATURE, "ruins" },
++        { Shipwreck,      GK_FEATURE, "shipwreck" },
++        { Ruined_Portal,  GK_FEATURE, "portal" },
++        { Ruined_Portal_N,GK_FEATURE, "portal_n" },
++        { Ancient_City,   GK_FEATURE, "ancient_city" },
++        { Trail_Ruins,    GK_FEATURE, "trails" },
++        { Trial_Chambers, GK_FEATURE, "chambers" },
++        { Monument,       GK_LARGE,   "monument" },
++        { Mansion,        GK_LARGE,   "mansion" },
++        { Outpost,        GK_OUTPOST, "outpost" },
++    };
++    const int mcs[] = {
++        MC_1_7, MC_1_9, MC_1_12, MC_1_13, MC_1_15, MC_1_16_1, MC_1_17,
++        MC_1_18, MC_1_19, MC_1_20, MC_1_21_1,
++    };
++
++    std::mt19937_64 rng(12345);
++    long tested = 0, mismatches = 0, passes = 0, outposts_dropped = 0;
++
++    for (const T& t : types)
++    {
++        for (int mc : mcs)
++        {
++            StructureConfig sc;
++            if (!getStructureConfig(t.st, mc, &sc))
++                continue;
++
++            for (int iter = 0; iter < 400; iter++)
++            {
++                GkCond c;
++                memset(&c, 0, sizeof(c));
++                c.salt = sc.salt;
++                c.regionSize = sc.regionSize;
++                c.chunkRange = sc.chunkRange;
++                c.kind = t.kind;
++                c.count = 1 + (int)(rng() % 3);
++
++                int x1 = (int)(rng() % 8001) - 4000;
++                int z1 = (int)(rng() % 8001) - 4000;
++                int span = (iter % 2) ? 3000 : 300; // half the cases use small areas (more rejections)
++                int w = 16 + (int)(rng() % span);
++                int h = 16 + (int)(rng() % span);
++                int rs = sc.regionSize << 4;
++
++                if (rng() % 3 == 0)
++                {   // radius mode, like cond->rmax
++                    int rmax = 32 + (int)(rng() % ((iter % 2) ? 2500 : 300));
++                    int r1 = rmax - 1;
++                    c.x1 = -r1; c.z1 = -r1; c.x2 = r1; c.z2 = r1;
++                    c.useRadius = 1;
++                    c.rmaxsq = (uint64_t)((int64_t)r1 * r1 + 1);
++                }
++                else
++                {
++                    c.x1 = x1; c.z1 = z1; c.x2 = x1 + w; c.z2 = z1 + h;
++                }
++                c.rx1 = floordivi(c.x1, rs);
++                c.rz1 = floordivi(c.z1, rs);
++                c.rx2 = floordivi(c.x2, rs);
++                c.rz2 = floordivi(c.z2, rs);
++
++                for (int k = 0; k < 40; k++)
++                {
++                    uint64_t seed = rng();
++                    if (k % 4 == 0) seed &= 0xffffffffffffULL;
++                    int ref = refCount(t.st, mc, seed, c) >= c.count;
++                    int got = gk_cond_passes(&c, seed);
++                    tested++;
++                    passes += got;
++                    if (t.kind == GK_OUTPOST)
++                    {
++                        if (ref && !got)
++                        {
++                            mismatches++;
++                            outposts_dropped++;
++                        }
++                    }
++                    else if (ref != got)
++                    {
++                        if (mismatches < 10)
++                            printf("MISMATCH %s mc=%d seed=%llu ref=%d got=%d\n",
++                                t.name, mc, (unsigned long long)seed, ref, got);
++                        mismatches++;
++                    }
++                }
++            }
++        }
++    }
++
++    printf("tested=%ld kernel_passes=%ld mismatches=%ld (outpost false negatives=%ld)\n",
++        tested, passes, mismatches, outposts_dropped);
++    return mismatches ? 1 : 0;
++}
+diff --git a/tests/mock_opencl.cpp b/tests/mock_opencl.cpp
+new file mode 100644
+index 0000000..3a5d469
+--- /dev/null
++++ b/tests/mock_opencl.cpp
+@@ -0,0 +1,120 @@
++// A CPU "OpenCL driver" for testing the host code in src/gpusearch.cpp.
++// It implements just the entry points the host uses and runs the kernel logic
++// (src/gpukernel.cl, included as C++) in plain loops. Results are produced in
++// reverse order on purpose, like unordered GPU atomics.
++#include <cstdint>
++#include <cstdio>
++#include <cstring>
++#include <cstdlib>
++#include <vector>
++#include <string>
++#include "../src/cl_min.h"
++
++typedef uint64_t ulong;
++typedef int64_t  slong;
++typedef uint32_t uint;
++#define __constant
++#define __global
++#define __kernel
++#include "../src/gpukernel.cl"
++
++struct MBuf { std::vector<unsigned char> d; };
++struct MKernel { bool isList; std::vector<std::vector<unsigned char>> args; };
++struct MProg { std::string src; };
++
++#define API extern "C" __attribute__((visibility("default")))
++
++static int g_plat, g_dev;
++long g_mock_launches = 0;
++API long mock_launch_count() { return g_mock_launches; }
++
++API cl_int CL_API_CALL clGetPlatformIDs(cl_uint n, cl_platform_id *p, cl_uint *np)
++{ if (np) *np = 1; if (p && n) p[0] = (cl_platform_id)&g_plat; return CL_SUCCESS; }
++API cl_int CL_API_CALL clGetDeviceIDs(cl_platform_id, cl_device_type t, cl_uint n, cl_device_id *d, cl_uint *nd)
++{
++    if (!(t & CL_DEVICE_TYPE_GPU)) { if (nd) *nd = 0; return -1; }
++    if (nd) *nd = 1; if (d && n) d[0] = (cl_device_id)&g_dev; return CL_SUCCESS;
++}
++API cl_int CL_API_CALL clGetDeviceInfo(cl_device_id, cl_device_info i, size_t sz, void *v, size_t *r)
++{
++    if (r) *r = 0;
++    switch (i) {
++    case CL_DEVICE_AVAILABLE: case CL_DEVICE_COMPILER_AVAILABLE: *(cl_bool*)v = 1; break;
++    case CL_DEVICE_MAX_COMPUTE_UNITS: *(cl_uint*)v = 8; break;
++    case CL_DEVICE_HOST_UNIFIED_MEMORY: *(cl_bool*)v = 0; break;
++    case CL_DEVICE_NAME: snprintf((char*)v, sz, "Mock GPU (CPU emulation)"); break;
++    default: break;
++    }
++    return CL_SUCCESS;
++}
++API cl_context CL_API_CALL clCreateContext(const cl_context_properties*, cl_uint, const cl_device_id*, void (CL_API_CALL *)(const char*, const void*, size_t, void*), void*, cl_int *e)
++{ *e = CL_SUCCESS; return (cl_context)new int(1); }
++API cl_command_queue CL_API_CALL clCreateCommandQueue(cl_context, cl_device_id, cl_command_queue_properties, cl_int *e)
++{ *e = CL_SUCCESS; return (cl_command_queue)new int(2); }
++API cl_program CL_API_CALL clCreateProgramWithSource(cl_context, cl_uint, const char **s, const size_t *l, cl_int *e)
++{ *e = CL_SUCCESS; MProg *p = new MProg; p->src.assign(s[0], l[0]); return (cl_program)p; }
++API cl_int CL_API_CALL clBuildProgram(cl_program p, cl_uint, const cl_device_id*, const char *opt, void (CL_API_CALL *)(cl_program, void*), void*)
++{
++    MProg *m = (MProg*)p;
++    if (!opt || !strstr(opt, "-DGK_OPENCL")) return -11;           // CL_BUILD_PROGRAM_FAILURE
++    if (m->src.find("gk_filter_range") == std::string::npos) return -11;
++    return CL_SUCCESS;
++}
++API cl_int CL_API_CALL clGetProgramBuildInfo(cl_program, cl_device_id, cl_program_build_info, size_t, void *v, size_t *r)
++{ if (r) *r = 1; if (v) *(char*)v = 0; return CL_SUCCESS; }
++API cl_kernel CL_API_CALL clCreateKernel(cl_program, const char *name, cl_int *e)
++{
++    MKernel *k = new MKernel; k->args.resize(8);
++    if (!strcmp(name, "gk_filter_range")) k->isList = false;
++    else if (!strcmp(name, "gk_filter_list")) k->isList = true;
++    else { *e = -46; delete k; return nullptr; }
++    *e = CL_SUCCESS; return (cl_kernel)k;
++}
++API cl_mem CL_API_CALL clCreateBuffer(cl_context, cl_mem_flags f, size_t sz, void *host, cl_int *e)
++{
++    MBuf *b = new MBuf; b->d.assign(sz, 0);
++    if ((f & CL_MEM_COPY_HOST_PTR) && host) memcpy(b->d.data(), host, sz);
++    *e = CL_SUCCESS; return (cl_mem)b;
++}
++API cl_int CL_API_CALL clEnqueueWriteBuffer(cl_command_queue, cl_mem m, cl_bool, size_t off, size_t sz, const void *p, cl_uint, const cl_event*, cl_event*)
++{ MBuf *b = (MBuf*)m; if (off + sz > b->d.size()) return -30; memcpy(b->d.data() + off, p, sz); return CL_SUCCESS; }
++API cl_int CL_API_CALL clEnqueueReadBuffer(cl_command_queue, cl_mem m, cl_bool, size_t off, size_t sz, void *p, cl_uint, const cl_event*, cl_event*)
++{ MBuf *b = (MBuf*)m; if (off + sz > b->d.size()) return -30; memcpy(p, b->d.data() + off, sz); return CL_SUCCESS; }
++API cl_int CL_API_CALL clSetKernelArg(cl_kernel k, cl_uint i, size_t sz, const void *v)
++{
++    MKernel *m = (MKernel*)k; if (i >= 8) return -49;
++    m->args[i].assign((const unsigned char*)v, (const unsigned char*)v + sz); return CL_SUCCESS;
++}
++template<class T> static T arg(MKernel *k, int i) { T v; memcpy(&v, k->args[i].data(), sizeof(T)); return v; }
++
++API cl_int CL_API_CALL clEnqueueNDRangeKernel(cl_command_queue, cl_kernel kk, cl_uint, const size_t*, const size_t *gws, const size_t*, cl_uint, const cl_event*, cl_event*)
++{
++    MKernel *k = (MKernel*)kk;
++    g_mock_launches++;
++    MBuf *conds = arg<MBuf*>(k, 0);
++    int nconds = arg<int>(k, 1);
++    if (nconds < 1 || nconds > GK_MAX_CONDS || conds->d.size() < (size_t)nconds * sizeof(GkCond)) return -30;
++    const GkCond *cv = (const GkCond*)conds->d.data();
++    ulong start = 0; MBuf *list = nullptr;
++    if (k->isList) list = arg<MBuf*>(k, 2); else start = arg<ulong>(k, 2);
++    ulong total = arg<ulong>(k, 3);
++    MBuf *out = arg<MBuf*>(k, 4);
++    MBuf *cnt = arg<MBuf*>(k, 5);
++    uint cap = arg<uint>(k, 6);
++    if (out->d.size() < (size_t)cap * 8) return -30;
++    uint *pc = (uint*)cnt->d.data();
++    ulong *po = (ulong*)out->d.data();
++    for (ulong g = *gws; g-- > 0;)
++    {
++        if (g >= total) continue;
++        ulong seed = k->isList ? ((ulong*)list->d.data())[g] : start + g;
++        if (gk_seed_passes(cv, nconds, seed)) { uint idx = (*pc)++; if (idx < cap) po[idx] = seed; }
++    }
++    return CL_SUCCESS;
++}
++API cl_int CL_API_CALL clFinish(cl_command_queue) { return CL_SUCCESS; }
++API cl_int CL_API_CALL clReleaseMemObject(cl_mem m) { delete (MBuf*)m; return CL_SUCCESS; }
++API cl_int CL_API_CALL clReleaseKernel(cl_kernel k) { delete (MKernel*)k; return CL_SUCCESS; }
++API cl_int CL_API_CALL clReleaseProgram(cl_program p) { delete (MProg*)p; return CL_SUCCESS; }
++API cl_int CL_API_CALL clReleaseCommandQueue(cl_command_queue) { return CL_SUCCESS; }
++API cl_int CL_API_CALL clReleaseContext(cl_context) { return CL_SUCCESS; }
+diff --git a/tests/qtstub/QElapsedTimer b/tests/qtstub/QElapsedTimer
+new file mode 100644
+index 0000000..c359a3f
+--- /dev/null
++++ b/tests/qtstub/QElapsedTimer
+@@ -0,0 +1,10 @@
++#pragma once
++#include <chrono>
++#include <cstdint>
++typedef int64_t qint64;
++class QElapsedTimer {
++    std::chrono::steady_clock::time_point t0;
++public:
++    void start() { t0 = std::chrono::steady_clock::now(); }
++    qint64 nsecsElapsed() const { return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-t0).count(); }
++};
+diff --git a/tests/qtstub/QFile b/tests/qtstub/QFile
+new file mode 100644
+index 0000000..a8dbd88
+--- /dev/null
++++ b/tests/qtstub/QFile
+@@ -0,0 +1,20 @@
++#pragma once
++#include "QString"
++#include <cstdlib>
++#include <fstream>
++#include <sstream>
++class QIODevice { public: enum OpenModeFlag { ReadOnly = 1 }; };
++class QFile {
++    std::string path; std::string data;
++public:
++    QFile(const QString& p) { path = p.s; }
++    bool open(int) {
++        // resource ":/gpu/gpukernel.cl" -> real file (set GK_KERNEL_PATH)
++        const char *k = getenv("GK_KERNEL_PATH");
++        std::ifstream f(k ? k : path.c_str(), std::ios::binary);
++        if (!f) return false;
++        std::stringstream ss; ss << f.rdbuf(); data = ss.str();
++        return true;
++    }
++    QByteArray readAll() { QByteArray b; b.s = data; return b; }
++};
+diff --git a/tests/qtstub/QLibrary b/tests/qtstub/QLibrary
+new file mode 100644
+index 0000000..57ef30a
+--- /dev/null
++++ b/tests/qtstub/QLibrary
+@@ -0,0 +1,17 @@
++#pragma once
++#include "QString"
++#include <dlfcn.h>
++#include <cstdlib>
++class QLibrary {
++    void *h = nullptr; std::string name;
++public:
++    void setFileName(const QString& n) { name = n.s; }
++    bool load() {
++        if (h) return true;
++        const char *m = getenv("GK_MOCK_CL");           // test hook: load the mock driver
++        h = dlopen(m ? m : name.c_str(), RTLD_NOW);
++        return h != nullptr;
++    }
++    bool isLoaded() const { return h != nullptr; }
++    void *resolve(const char *s) { return h ? dlsym(h, s) : nullptr; }
++};
+diff --git a/tests/qtstub/QMap b/tests/qtstub/QMap
+new file mode 100644
+index 0000000..a1ab06c
+--- /dev/null
++++ b/tests/qtstub/QMap
+@@ -0,0 +1,3 @@
++#pragma once
++#include <map>
++template<class K, class V> using QMap = std::map<K,V>;
+diff --git a/tests/qtstub/QMutex b/tests/qtstub/QMutex
+new file mode 100644
+index 0000000..9d5e741
+--- /dev/null
++++ b/tests/qtstub/QMutex
+@@ -0,0 +1,4 @@
++#pragma once
++#include <mutex>
++class QMutex { public: std::mutex m; void lock(){m.lock();} void unlock(){m.unlock();} };
++class QMutexLocker { QMutex *mm; public: QMutexLocker(QMutex *x):mm(x){mm->lock();} ~QMutexLocker(){mm->unlock();} };
+diff --git a/tests/qtstub/QMutexLocker b/tests/qtstub/QMutexLocker
+new file mode 100644
+index 0000000..f919b30
+--- /dev/null
++++ b/tests/qtstub/QMutexLocker
+@@ -0,0 +1,2 @@
++#pragma once
++#include "QMutex"
+diff --git a/tests/qtstub/QString b/tests/qtstub/QString
+new file mode 100644
+index 0000000..e4b4db3
+--- /dev/null
++++ b/tests/qtstub/QString
+@@ -0,0 +1,28 @@
++#pragma once
++#include <string>
++#include <cstring>
++#include <cstdio>
++#define QT_TRANSLATE_NOOP(c,s) s
++class QByteArray {
++public:
++    std::string s;
++    QByteArray() {}
++    QByteArray(int n, char c) : s((size_t)n, c) {}
++    const char *constData() const { return s.data(); }
++    char *data() { return &s[0]; }
++    int size() const { return (int)s.size(); }
++};
++class QString {
++public:
++    std::string s;
++    QString() {}
++    QString(const char *c) : s(c) {}
++    static QString fromLatin1(const char *c) { return QString(c); }
++    static QString fromLatin1(const QByteArray& b) { return QString(b.s.c_str()); }
++    QString left(int n) const { QString r; r.s = s.substr(0, (size_t)n); return r; }
++    QString trimmed() const { return *this; }
++    QString operator+(const QString& o) const { QString r; r.s = s + o.s; return r; }
++    friend QString operator+(const char *a, const QString& b) { QString r; r.s = std::string(a) + b.s; return r; }
++    bool isEmpty() const { return s.empty(); }
++    const char *c_str() const { return s.c_str(); }
++};
+diff --git a/tests/qtstub/QVector b/tests/qtstub/QVector
+new file mode 100644
+index 0000000..85e8c6d
+--- /dev/null
++++ b/tests/qtstub/QVector
+@@ -0,0 +1,3 @@
++#pragma once
++#include <vector>
++template<class T> using QVector = std::vector<T>;
+diff --git a/tests/run_gpu_host_test.sh b/tests/run_gpu_host_test.sh
+new file mode 100755
+index 0000000..1b861a8
+--- /dev/null
++++ b/tests/run_gpu_host_test.sh
+@@ -0,0 +1,15 @@
++#!/bin/sh
++# Builds GpuFilter against Qt stand-ins and a mock OpenCL driver, then runs it.
++set -e
++here=$(cd "$(dirname "$0")" && pwd)
++root="$here/.."
++out=${TMPDIR:-/tmp}/gk_host_build
++mkdir -p "$out"
++for f in "$root"/cubiomes/*.c; do
++  case "$f" in */tests.c|*/main.c) continue;; esac
++  gcc -O2 -DSTRUCT_CONFIG_OVERRIDE=1 -fwrapv -c "$f" -o "$out/$(basename "$f").o"
++done
++g++ -O2 -std=c++17 -shared -fPIC -o "$out/libmockcl.so" "$here/mock_opencl.cpp"
++g++ -O2 -std=c++17 -DSTRUCT_CONFIG_OVERRIDE=1 -I"$here/qtstub" -I"$root" -I"$root/src" \
++    -o "$out/gk_host_test" "$here/gpu_host_test.cpp" "$root/src/gpusearch.cpp" "$out"/*.o -ldl -lm
++GK_MOCK_CL="$out/libmockcl.so" GK_KERNEL_PATH="$root/src/gpukernel.cl" "$out/gk_host_test"
+diff --git a/tests/run_gpu_kernel_test.sh b/tests/run_gpu_kernel_test.sh
+new file mode 100755
+index 0000000..9c5765a
+--- /dev/null
++++ b/tests/run_gpu_kernel_test.sh
+@@ -0,0 +1,12 @@
++#!/bin/sh
++# Compiles cubiomes + the kernel-as-C++ harness and runs it.
++set -e
++here=$(cd "$(dirname "$0")" && pwd)
++out=${TMPDIR:-/tmp}/gk_build
++mkdir -p "$out"
++for f in "$here"/../cubiomes/*.c; do
++  case "$f" in */tests.c|*/main.c) continue;; esac
++  gcc -O2 -c "$f" -o "$out/$(basename "$f").o"
++done
++g++ -O2 -std=c++17 -o "$out/gk_test" "$here/gpu_kernel_test.cpp" "$out"/*.o -lm
++"$out/gk_test"
