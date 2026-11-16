@@ -48,7 +48,7 @@ static inline void gk_region_pos(const GkCond *c, ulong seed, int rx, int rz,
                                  int *px, int *pz)
 {
     const ulong K = 0x5deece66dUL;
-    const ulong M = (1UL << 48) - 1;
+    const ulong M = 0xffffffffffffUL;
     const ulong b = 0xbUL;
     ulong r = (ulong) c->chunkRange;
     int cx, cz;
@@ -96,7 +96,7 @@ static inline void gk_region_pos(const GkCond *c, ulong seed, int rx, int rz,
 // Outpost: cubiomes rolls nextInt(5)==0 with the attempt seed of the position.
 static inline int gk_outpost_ok(ulong seed, int px, int pz)
 {
-    const ulong M = (1UL << 48) - 1;
+    const ulong M = 0xffffffffffffUL;
     ulong s = seed;
     s ^= (ulong)(px >> 4 >> 4) ^ ((ulong)(pz >> 4 >> 4) << 4);
     s = (s ^ 0x5deece66dUL) & M;                       // setSeed
